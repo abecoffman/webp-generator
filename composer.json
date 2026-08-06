@@ -20,6 +20,11 @@
         "brain/monkey": "^2.6",
         "dealerdirect/phpcodesniffer-composer-installer": "^1.0"
     },
+    "autoload-dev": {
+        "psr-4": {
+            "WWG\\Tests\\": "tests/"
+        }
+    },
     "config": {
         "allow-plugins": {
             "dealerdirect/phpcodesniffer-composer-installer": true

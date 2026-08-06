@@ -1,6 +1,8 @@
-# Composer (dev dependencies only -- the plugin has no runtime deps)
+# Composer (dev dependencies only -- the plugin has no runtime deps).
+# composer.lock IS committed despite that: it pins exact dev-tool
+# versions (PHPCS/PHPUnit/etc.) so CI stays reproducible across the PHP
+# version matrix instead of silently drifting as those get updated.
 /vendor/
-composer.lock
 
 # Test artifacts
 .phpunit.result.cache
