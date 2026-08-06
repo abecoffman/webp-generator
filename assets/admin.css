@@ -1,0 +1,220 @@
+/* [hidden] must always win over any element that also sets its own
+ * `display` (e.g. .wwg-stats below) -- otherwise equal-specificity plus
+ * source order lets the later rule silently override the browser's
+ * default [hidden] { display: none }, leaving a "hidden" element
+ * visible. Caught by actually screenshotting the rendered page, not by
+ * reading the CSS.
+ */
+[hidden] {
+	display: none !important;
+}
+
+/* Layout ------------------------------------------------------------- */
+
+.wwg-wrap {
+	max-width: 800px;
+}
+
+.wwg-page-lede {
+	color: #50575e;
+	font-size: 14px;
+	max-width: 60em;
+}
+
+/* Cards ---------------------------------------------------------------
+ * Mirrors WP admin's own .card component (white surface, hairline
+ * border, faint shadow, square-ish corners) rather than inventing a
+ * different visual language for a page that lives inside wp-admin's
+ * chrome. Each card is one clearly separate concern: status, settings,
+ * the scan/generate tool.
+ */
+
+.wwg-card {
+	background: #fff;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+	margin: 20px 0;
+	padding: 24px;
+}
+
+.wwg-card-header {
+	margin-bottom: 20px;
+}
+
+.wwg-card-header h2 {
+	margin: 0 0 4px;
+	padding: 0;
+	font-size: 16px;
+}
+
+.wwg-card-lede {
+	margin: 0;
+	color: #50575e;
+	font-size: 13px;
+}
+
+/* Rewrite Rules -------------------------------------------------------- */
+
+.wwg-status-detail--muted {
+	color: #646970;
+	font-size: 13px;
+}
+
+.wwg-inline-form {
+	margin: 8px 0;
+}
+
+.wwg-code {
+	background: #f6f7f7;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	padding: 12px;
+	margin: 8px 0;
+	overflow-x: auto;
+	font-size: 12px;
+	line-height: 1.6;
+	max-width: 100%;
+	color: #1e1e1e;
+}
+
+/* Syntax highlighting for the .htaccess example -- colors drawn from
+ * WP admin's own palette (link blue, warning amber, success green, its
+ * two standard grays) rather than an unrelated "code theme" palette, so
+ * this reads as part of wp-admin rather than an embedded foreign widget.
+ */
+.wwg-tok-comment {
+	color: #8c8f94;
+	font-style: italic;
+}
+
+.wwg-tok-tag {
+	color: #646970;
+}
+
+.wwg-tok-keyword {
+	color: #2271b1;
+	font-weight: 600;
+}
+
+.wwg-tok-variable {
+	color: #ab5c00;
+}
+
+.wwg-tok-flag {
+	color: #007017;
+}
+
+details summary {
+	cursor: pointer;
+	font-size: 13px;
+	color: #2271b1;
+	margin-top: 8px;
+}
+
+/* Settings --------------------------------------------------------------
+ * A labeled field block, not a two-column form-table -- reads oddly for
+ * a single setting (or even a handful), which is the common case here.
+ */
+
+.wwg-field {
+	margin-bottom: 16px;
+	max-width: 400px;
+}
+
+.wwg-field label {
+	display: block;
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.wwg-field-description {
+	margin: 0 0 8px;
+	color: #646970;
+	font-size: 13px;
+}
+
+/* Generate WebP Images ---------------------------------------------- */
+
+.wwg-actions {
+	display: flex;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.wwg-progress {
+	margin-bottom: 16px;
+}
+
+.wwg-progress-bar {
+	background: #dcdcde;
+	border-radius: 4px;
+	height: 8px;
+	overflow: hidden;
+}
+
+.wwg-progress-bar-fill {
+	background: #2271b1;
+	height: 100%;
+	width: 0;
+	transition: width 0.2s ease;
+}
+
+.wwg-progress-label {
+	margin: 6px 0 0;
+	font-size: 12px;
+	color: #50575e;
+}
+
+.wwg-summary {
+	font-size: 15px;
+	font-weight: 600;
+	margin: 0 0 16px;
+	min-height: 1.2em;
+}
+
+.wwg-summary:empty {
+	display: none;
+}
+
+.wwg-stats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 24px;
+	margin: 4px 0 20px;
+}
+
+.wwg-stats:last-child {
+	margin-bottom: 4px;
+}
+
+.wwg-stat {
+	display: flex;
+	flex-direction: column;
+}
+
+.wwg-stat--wide {
+	min-width: 160px;
+}
+
+.wwg-stat-value {
+	font-size: 20px;
+	font-weight: 600;
+	line-height: 1.3;
+}
+
+.wwg-stat-label {
+	font-size: 12px;
+	color: #646970;
+}
+
+.wwg-log {
+	color: #50575e;
+	font-size: 13px;
+	min-height: 1.5em;
+	margin: 12px 0 0;
+}
+
+.wwg-log:empty {
+	display: none;
+}

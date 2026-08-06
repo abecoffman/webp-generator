@@ -1,0 +1,14 @@
+# Composer (dev dependencies only -- the plugin has no runtime deps)
+/vendor/
+composer.lock
+
+# Test artifacts
+.phpunit.result.cache
+/tests/tmp/
+
+# OS cruft
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
