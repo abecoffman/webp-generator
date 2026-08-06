@@ -93,7 +93,15 @@ class WWG_Admin {
 			update_option( WWG_Generator::OPTION_QUALITY, $quality );
 		}
 
-		wp_safe_redirect( add_query_arg( array( 'page' => self::PAGE_SLUG, 'settings-updated' => 'true' ), admin_url( 'tools.php' ) ) );
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'page'             => self::PAGE_SLUG,
+					'settings-updated' => 'true',
+				),
+				admin_url( 'tools.php' )
+			)
+		);
 		exit;
 	}
 
@@ -116,10 +124,15 @@ class WWG_Admin {
 
 		$success = ( 'install' === $action ) ? WWG_Htaccess::install() : WWG_Htaccess::remove();
 
-		wp_safe_redirect( add_query_arg( array(
-			'page'             => self::PAGE_SLUG,
-			'wwg-htaccess'     => $success ? $action . '-success' : $action . '-failed',
-		), admin_url( 'tools.php' ) ) );
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'page'         => self::PAGE_SLUG,
+					'wwg-htaccess' => $success ? $action . '-success' : $action . '-failed',
+				),
+				admin_url( 'tools.php' )
+			)
+		);
 		exit;
 	}
 
@@ -159,33 +172,39 @@ class WWG_Admin {
 			true
 		);
 
-		wp_localize_script( 'wwg-admin', 'wwgAdmin', array(
-			'ajaxUrl' => admin_url( 'admin-ajax.php' ),
-			'action'  => self::AJAX_ACTION,
-			'nonce'   => wp_create_nonce( self::NONCE_ACTION ),
-			'strings' => array(
-				'confirmGenerate'  => __( 'Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'wp-webp-generator' ),
-				'checking'         => __( 'Checking %s…', 'wp-webp-generator' ),
-				'converting'       => __( 'Generating %s…', 'wp-webp-generator' ),
-				'uploadsRoot'      => __( 'the uploads folder', 'wp-webp-generator' ),
-				/* translators: %d: number of images scanned so far. */
-				'scannedSoFar'     => __( '%d images scanned so far…', 'wp-webp-generator' ),
-				/* translators: %d: number of images generated so far. */
-				'generatedSoFar'   => __( '%d images generated so far…', 'wp-webp-generator' ),
-				'missingNone'      => __( 'Every image already has a .webp version. Nothing to generate.', 'wp-webp-generator' ),
-				/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB". */
-				'missingPlural'    => __( '%1$d images are missing a .webp version (%2$s).', 'wp-webp-generator' ),
-				/* translators: 1: combined file size, e.g. "420 KB". */
-				'missingSingular'  => __( '1 image is missing a .webp version (%2$s).', 'wp-webp-generator' ),
-				/* translators: %d: number of images. */
-				'generateDone'     => __( 'Done -- generated %d image(s).', 'wp-webp-generator' ),
-				'cacheCleared'     => __( 'Also cleared the page cache so these take effect right away.', 'wp-webp-generator' ),
-				'paused'           => __( 'Paused. Click "Generate" to pick up where this left off.', 'wp-webp-generator' ),
-				'vsOriginal'       => __( 'vs.', 'wp-webp-generator' ),
-				'folders'          => __( 'folders', 'wp-webp-generator' ),
-				'error'            => __( 'Something went wrong:', 'wp-webp-generator' ),
-			),
-		) );
+		wp_localize_script(
+			'wwg-admin',
+			'wwgAdmin',
+			array(
+				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+				'action'  => self::AJAX_ACTION,
+				'nonce'   => wp_create_nonce( self::NONCE_ACTION ),
+				'strings' => array(
+					'confirmGenerate' => __( 'Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'wp-webp-generator' ),
+					/* translators: %s: folder path currently being scanned, e.g. "2024/03". Substituted client-side in admin.js. */
+					'checking'        => __( 'Checking %s…', 'wp-webp-generator' ),
+					/* translators: %s: folder path currently being processed, e.g. "2024/03". Substituted client-side in admin.js. */
+					'converting'      => __( 'Generating %s…', 'wp-webp-generator' ),
+					'uploadsRoot'     => __( 'the uploads folder', 'wp-webp-generator' ),
+					/* translators: %d: number of images scanned so far. */
+					'scannedSoFar'    => __( '%d images scanned so far…', 'wp-webp-generator' ),
+					/* translators: %d: number of images generated so far. */
+					'generatedSoFar'  => __( '%d images generated so far…', 'wp-webp-generator' ),
+					'missingNone'     => __( 'Every image already has a .webp version. Nothing to generate.', 'wp-webp-generator' ),
+					/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB". */
+					'missingPlural'   => __( '%1$d images are missing a .webp version (%2$s).', 'wp-webp-generator' ),
+					/* translators: 1: combined file size, e.g. "420 KB". */
+					'missingSingular' => __( '1 image is missing a .webp version (%2$s).', 'wp-webp-generator' ),
+					/* translators: %d: number of images. */
+					'generateDone'    => __( 'Done -- generated %d image(s).', 'wp-webp-generator' ),
+					'cacheCleared'    => __( 'Also cleared the page cache so these take effect right away.', 'wp-webp-generator' ),
+					'paused'          => __( 'Paused. Click "Generate" to pick up where this left off.', 'wp-webp-generator' ),
+					'vsOriginal'      => __( 'vs.', 'wp-webp-generator' ),
+					'folders'         => __( 'folders', 'wp-webp-generator' ),
+					'error'           => __( 'Something went wrong:', 'wp-webp-generator' ),
+				),
+			)
+		);
 	}
 
 	/**
@@ -256,15 +275,17 @@ class WWG_Admin {
 			}
 		}
 
-		wp_send_json_success( array(
-			'done'          => $result['done'],
-			'dir'           => $result['dir'],
-			'dir_index'     => $result['dir_index'],
-			'file_offset'   => $result['file_offset'],
-			'total_dirs'    => count( $dirs ),
-			'stats'         => $result['stats'],
-			'cache_cleared' => $cache_cleared,
-		) );
+		wp_send_json_success(
+			array(
+				'done'          => $result['done'],
+				'dir'           => $result['dir'],
+				'dir_index'     => $result['dir_index'],
+				'file_offset'   => $result['file_offset'],
+				'total_dirs'    => count( $dirs ),
+				'stats'         => $result['stats'],
+				'cache_cleared' => $cache_cleared,
+			)
+		);
 	}
 
 	/**
@@ -318,6 +339,8 @@ class WWG_Admin {
 		 * scan/convert tools walk. Return false-y from a callback keyed
 		 * on the path to exclude a folder, e.g. to skip a large archive
 		 * of images a site never wants converted.
+		 *
+		 * @since 1.3.0
 		 *
 		 * @param string[] $dirs Relative folder paths, '' meaning the
 		 *                       uploads root itself.
@@ -399,7 +422,7 @@ class WWG_Admin {
 		$slice = array_slice( $files, $file_offset, self::BATCH_SIZE[ $mode ] );
 
 		foreach ( $slice as $filename ) {
-			$stats['scanned']++;
+			++$stats['scanned'];
 			$source_path = $abs_dir . '/' . $filename;
 
 			if ( 'convert' === $mode ) {
@@ -409,21 +432,23 @@ class WWG_Admin {
 					continue;
 				}
 
-				$stats['missing']++;
+				++$stats['missing'];
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish or become unreadable between the directory listing above and this stat() call; (int) cast already turns a false return into a harmless 0.
 				$stats['original_bytes'] += (int) @filesize( $source_path );
 
 				if ( 'created' === $outcome['status'] ) {
-					$stats['converted']++;
+					++$stats['converted'];
 					$stats['webp_bytes'] += $outcome['webp_bytes'];
 				} else {
-					$stats['failed']++;
+					++$stats['failed'];
 				}
 			} else {
 				$webp_path = preg_replace( '/\.(jpe?g|png)$/i', '.webp', $source_path );
 				if ( file_exists( $webp_path ) ) {
 					continue;
 				}
-				$stats['missing']++;
+				++$stats['missing'];
+				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish or become unreadable between the directory listing above and this stat() call; (int) cast already turns a false return into a harmless 0.
 				$stats['original_bytes'] += (int) @filesize( $source_path );
 			}
 		}

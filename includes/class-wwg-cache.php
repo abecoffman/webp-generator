@@ -34,10 +34,14 @@ class WWG_Cache {
 	 * @param int $attachment_id Attachment ID.
 	 */
 	public static function clear_for_attachment( $attachment_id ) {
-		$post_ids = array_unique( array_filter( array(
-			(int) $attachment_id,
-			(int) wp_get_post_parent_id( $attachment_id ),
-		) ) );
+		$post_ids = array_unique(
+			array_filter(
+				array(
+					(int) $attachment_id,
+					(int) wp_get_post_parent_id( $attachment_id ),
+				)
+			)
+		);
 
 		foreach ( $post_ids as $post_id ) {
 			self::clear_post( $post_id );
@@ -47,6 +51,8 @@ class WWG_Cache {
 		 * Fires after WP WebP Generator's own best-effort per-attachment
 		 * cache clearing. Hook in here for any cache layer this plugin
 		 * doesn't already know about.
+		 *
+		 * @since 1.2.0
 		 *
 		 * @param int $attachment_id Attachment ID.
 		 */
@@ -140,6 +146,8 @@ class WWG_Cache {
 		 * Fires after WP WebP Generator's own best-effort full-site cache
 		 * clear (e.g. after a Tools > WebP Generator bulk conversion run
 		 * that actually created new files).
+		 *
+		 * @since 1.2.0
 		 */
 		do_action( 'wwg_clear_all_cache' );
 	}

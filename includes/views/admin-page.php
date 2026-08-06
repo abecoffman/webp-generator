@@ -19,7 +19,7 @@ $server_names = array(
 	'iis'       => 'IIS',
 	'unknown'   => __( 'your server', 'wp-webp-generator' ),
 );
-$server_name = $server_names[ $readiness['server_type'] ];
+$server_name  = $server_names[ $readiness['server_type'] ];
 ?>
 <div class="wrap wwg-wrap">
 	<h1><?php esc_html_e( 'WebP Generator', 'wp-webp-generator' ); ?></h1>
@@ -27,11 +27,13 @@ $server_name = $server_names[ $readiness['server_type'] ];
 		<?php esc_html_e( 'WordPress creates a .webp version of every new image you upload automatically. Use this page to generate .webp versions for images uploaded before that started, and to set up your server to actually serve them.', 'wp-webp-generator' ); ?>
 	</p>
 
+	<?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only: only decides which notice text to display, same as core's own options.php "settings-updated" check; the actual save already went through a real nonce check in WWG_Admin::maybe_save_settings() before this redirect happened. ?>
 	<?php if ( isset( $_GET['settings-updated'] ) ) : ?>
 		<div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Settings saved.', 'wp-webp-generator' ); ?></p></div>
 	<?php endif; ?>
 
 	<?php
+	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only display lookup, not a write; see the note above the settings-updated check. The real nonce check already happened in WWG_Admin::maybe_handle_htaccess_action() before this redirect.
 	$htaccess_result  = isset( $_GET['wwg-htaccess'] ) ? sanitize_key( $_GET['wwg-htaccess'] ) : '';
 	$htaccess_notices = array(
 		'install-success' => array( 'success', __( '.htaccess updated -- the WebP rule is now active.', 'wp-webp-generator' ) ),
@@ -147,14 +149,18 @@ $server_name = $server_names[ $readiness['server_type'] ];
 
 		<details<?php echo ( $readiness['htaccess_installed'] || $readiness['can_auto_install'] ) ? '' : ' open'; ?>>
 			<summary><?php esc_html_e( 'Example rule for Apache (.htaccess)', 'wp-webp-generator' ); ?></summary>
-			<pre class="wwg-code"><?php
+			<?php
+			// phpcs:disable Squiz.PHP.EmbeddedPhp.ContentBeforeOpen, Squiz.PHP.EmbeddedPhp.ContentAfterEnd -- deliberately NOT giving the PHP tags their own line here: <pre> makes surrounding whitespace significant, and a leading/trailing newline+indentation from "tag on its own line" would show up as a visible blank line and stray leading tabs in the rendered code block (this exact regression happened once already, from an automated formatter that doesn't know about the <pre> context -- see git blame before reverting this again).
 			// A PHP closing tag swallows exactly one trailing newline, so
 			// splitting this across two echo statements on separate
 			// lines silently loses the line break between them -- keep
 			// it in one block with an explicit "\n" instead.
+			?>
+			<pre class="wwg-code"><?php
 			echo '<span class="wwg-tok-comment">' . esc_html( '# ' . __( 'Add near the top of your .htaccess, before any WordPress rewrite rules.', 'wp-webp-generator' ) ) . "</span>\n";
-			echo WWG_Htaccess::get_rule_html(); // Already-escaped, syntax-highlighted HTML.
+			echo WWG_Htaccess::get_rule_html(); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- already HTML-escaped internally (every dynamic piece goes through esc_html() before being wrapped in <span> markup); it returns markup, not plain text, so a second pass through esc_html() here would double-escape it.
 			?></pre>
+			<?php // phpcs:enable Squiz.PHP.EmbeddedPhp.ContentBeforeOpen, Squiz.PHP.EmbeddedPhp.ContentAfterEnd ?>
 			<p class="wwg-status-detail--muted"><?php esc_html_e( 'On Nginx, IIS, or another server: same idea (serve the .webp sibling when it exists and the browser sends Accept: image/webp), different syntax.', 'wp-webp-generator' ); ?></p>
 		</details>
 	</div>

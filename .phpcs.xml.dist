@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<ruleset name="WP WebP Generator">
+	<description>Coding standards for WP WebP Generator.</description>
+
+	<file>.</file>
+	<exclude-pattern>/vendor/*</exclude-pattern>
+	<exclude-pattern>/tests/*</exclude-pattern>
+	<exclude-pattern>/languages/*</exclude-pattern>
+
+	<arg value="sp"/>
+	<arg name="colors"/>
+	<arg name="extensions" value="php"/>
+
+	<rule ref="WordPress-Extra">
+		<!-- Files intentionally use tabs for indentation, matching this
+		     codebase's existing style; the ruleset's default already
+		     expects that, no override needed. -->
+	</rule>
+
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="wp-webp-generator"/>
+			</property>
+		</properties>
+	</rule>
+
+	<config name="minimum_supported_wp_version" value="6.0"/>
+
+	<rule ref="PHPCompatibilityWP"/>
+	<config name="testVersion" value="7.4-"/>
+</ruleset>

@@ -36,3 +36,14 @@ function wwg_init() {
 	}
 }
 add_action( 'plugins_loaded', 'wwg_init' );
+
+/**
+ * Load translations. WordPress.org auto-loads translations for
+ * plugins it hosts as of WP 4.6, so this is a no-op there -- it's for
+ * the manual/GitHub-zip install path (see README.md), where nothing
+ * else would load a .mo file from /languages.
+ */
+function wwg_load_textdomain() {
+	load_plugin_textdomain( 'wp-webp-generator', false, dirname( plugin_basename( WWG_FILE ) ) . '/languages' );
+}
+add_action( 'init', 'wwg_load_textdomain' );

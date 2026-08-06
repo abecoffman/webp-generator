@@ -234,8 +234,10 @@ class WWG_Generator {
 		$image = false;
 
 		if ( 'image/jpeg' === $type['type'] && function_exists( 'imagecreatefromjpeg' ) ) {
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a corrupt/unreadable source file is an expected outcome here (see the two known-bad files this handles in production), not a bug to surface as a PHP warning; the null return already communicates failure to the caller.
 			$image = @imagecreatefromjpeg( $source_path );
 		} elseif ( 'image/png' === $type['type'] && function_exists( 'imagecreatefrompng' ) ) {
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
 			$image = @imagecreatefrompng( $source_path );
 			if ( $image ) {
 				imagepalettetotruecolor( $image );
@@ -249,7 +251,9 @@ class WWG_Generator {
 		}
 
 		$result = imagewebp( $image, $webp_path, $this->get_quality() );
-		imagedestroy( $image );
+		// No imagedestroy() call: GD images have been garbage-collected
+		// objects since PHP 8.0, and calling it is a deprecation warning
+		// as of PHP 8.5. $image goes out of scope on return regardless.
 
 		return (bool) $result;
 	}
