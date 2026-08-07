@@ -29,6 +29,10 @@ if [ -z "$VERSION" ]; then
 fi
 
 mkdir -p "$OUT_DIR" "$WORK_DIR/$SLUG"
+# Resolve to an absolute path now -- a relative $OUT_DIR (as passed by CI)
+# would otherwise be interpreted relative to $WORK_DIR once we cd into it
+# below, not the directory this script was invoked from.
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 rsync -a --exclude-from="$ROOT_DIR/.distignore" "$ROOT_DIR/" "$WORK_DIR/$SLUG/"
 
 ZIP_PATH="$OUT_DIR/${SLUG}-${VERSION}.zip"
