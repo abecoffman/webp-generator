@@ -29,7 +29,7 @@ class WWG_Htaccess {
 	 *
 	 * @var string
 	 */
-	const MARKER = 'WP WebP Generator';
+	const MARKER = 'WebP Generator';
 
 	/**
 	 * Absolute path to the site's root .htaccess -- same location

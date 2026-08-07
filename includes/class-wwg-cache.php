@@ -48,7 +48,7 @@ class WWG_Cache {
 		}
 
 		/**
-		 * Fires after WP WebP Generator's own best-effort per-attachment
+		 * Fires after WebP Generator's own best-effort per-attachment
 		 * cache clearing. Hook in here for any cache layer this plugin
 		 * doesn't already know about.
 		 *
@@ -143,7 +143,7 @@ class WWG_Cache {
 		do_action( 'litespeed_purge_all' );
 
 		/**
-		 * Fires after WP WebP Generator's own best-effort full-site cache
+		 * Fires after WebP Generator's own best-effort full-site cache
 		 * clear (e.g. after a Tools > WebP Generator bulk conversion run
 		 * that actually created new files).
 		 *
