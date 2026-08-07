@@ -1,8 +1,13 @@
 # Composer (dev dependencies only -- the plugin has no runtime deps).
-# composer.lock IS committed despite that: it pins exact dev-tool
-# versions (PHPCS/PHPUnit/etc.) so CI stays reproducible across the PHP
-# version matrix instead of silently drifting as those get updated.
+# composer.lock is deliberately NOT committed: composer.json's version
+# ranges (e.g. "phpunit/phpunit": "^9.6 || ^10.5") exist specifically so
+# each PHP version in the CI matrix resolves its OWN compatible set
+# (PHPUnit 9 on PHP 7.4/8.0, PHPUnit 10 on 8.3+) -- a single committed
+# lock file freezes one resolution for everyone, which broke PHP 7.4/8.0
+# in CI the first time this was tried (PHPUnit 10.5's own dependencies
+# require PHP >=8.1, and a lock file skips re-resolving that per job).
 /vendor/
+composer.lock
 
 # Test artifacts
 .phpunit.result.cache
