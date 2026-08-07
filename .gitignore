@@ -13,6 +13,9 @@ composer.lock
 .phpunit.result.cache
 /tests/tmp/
 
+# Release zips built by bin/build-zip.sh
+/dist/
+
 # OS cruft
 .DS_Store
 

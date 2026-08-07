@@ -5,8 +5,10 @@
 .phpcs.xml.dist
 .phpunit.result.cache
 .wordpress-org
+bin
 composer.json
 composer.lock
+dist
 phpunit.xml.dist
 README.md
 tests

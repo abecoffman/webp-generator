@@ -34,9 +34,10 @@ After activating, visit **Tools → WebP Generator** to scan your existing libra
 composer install   # dev dependencies: WPCS, PHPCompatibility, PHPUnit, Brain Monkey
 composer run phpcs  # coding standards
 composer run test   # unit tests
+bin/build-zip.sh    # build a clean, WordPress.org-ready dist/webp-generator-<version>.zip
 ```
 
-No build step — `assets/admin.js`/`admin.css` are plain, unbundled files.
+No JS/CSS build step — `assets/admin.js`/`admin.css` are plain, unbundled files. `bin/build-zip.sh` is packaging only: it strips dev-only files per `.distignore` (tests, CI config, etc.) into a zip that's actually installable. Pushing a `vX.Y.Z` tag runs the full CI suite (coding standards, PHPUnit, [Plugin Check](https://wordpress.org/plugins/plugin-check/)) and, if it's all green, publishes that zip as a GitHub release automatically.
 
 Internal PHP identifiers (classes, constants, hooks) use a `WWG_`/`wwg_` prefix from this plugin's working name before "wp" turned out to be a restricted term for the public-facing plugin name/slug on WordPress.org. Cosmetic only — the prefix itself is still valid and collision-free, so it wasn't worth the risk of a mechanical rename across the whole codebase.
 

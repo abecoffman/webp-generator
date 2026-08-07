@@ -1,8 +1,9 @@
-name: Tests
+name: CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -45,5 +46,22 @@ jobs:
       # none of that reaches WordPress.org's SVN distribution).
       - uses: wordpress/plugin-check-action@v1
         with:
-          exclude-directories: 'tests,.github,vendor,.wordpress-org,.git'
+          exclude-directories: 'tests,.github,vendor,.wordpress-org,.git,bin,dist'
           exclude-files: 'composer.json,composer.lock,.phpcs.xml.dist,.phpunit.result.cache,phpunit.xml.dist,.gitignore,.distignore,README.md'
+
+  release:
+    name: Build & publish release zip
+    needs: [phpcs, phpunit, plugin-check]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build plugin zip
+        run: VERSION="${GITHUB_REF_NAME#v}" bin/build-zip.sh dist
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
