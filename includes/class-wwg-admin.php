@@ -22,7 +22,7 @@ class WWG_Admin {
 	const SETTINGS_NONCE = 'wwg_settings';
 	const HTACCESS_NONCE = 'wwg_htaccess';
 	const CAPABILITY     = 'manage_options';
-	const PAGE_SLUG      = 'wp-webp-generator';
+	const PAGE_SLUG      = 'webp-generator';
 
 	/**
 	 * Transient used to tally how many images an in-progress convert run
@@ -141,8 +141,8 @@ class WWG_Admin {
 	 */
 	public function register_page() {
 		add_management_page(
-			__( 'WebP Generator', 'wp-webp-generator' ),
-			__( 'WebP Generator', 'wp-webp-generator' ),
+			__( 'WebP Generator', 'webp-generator' ),
+			__( 'WebP Generator', 'webp-generator' ),
 			self::CAPABILITY,
 			self::PAGE_SLUG,
 			array( $this, 'render_page' )
@@ -180,28 +180,28 @@ class WWG_Admin {
 				'action'  => self::AJAX_ACTION,
 				'nonce'   => wp_create_nonce( self::NONCE_ACTION ),
 				'strings' => array(
-					'confirmGenerate' => __( 'Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'wp-webp-generator' ),
+					'confirmGenerate' => __( 'Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'webp-generator' ),
 					/* translators: %s: folder path currently being scanned, e.g. "2024/03". Substituted client-side in admin.js. */
-					'checking'        => __( 'Checking %s…', 'wp-webp-generator' ),
+					'checking'        => __( 'Checking %s…', 'webp-generator' ),
 					/* translators: %s: folder path currently being processed, e.g. "2024/03". Substituted client-side in admin.js. */
-					'converting'      => __( 'Generating %s…', 'wp-webp-generator' ),
-					'uploadsRoot'     => __( 'the uploads folder', 'wp-webp-generator' ),
+					'converting'      => __( 'Generating %s…', 'webp-generator' ),
+					'uploadsRoot'     => __( 'the uploads folder', 'webp-generator' ),
 					/* translators: %d: number of images scanned so far. */
-					'scannedSoFar'    => __( '%d images scanned so far…', 'wp-webp-generator' ),
+					'scannedSoFar'    => __( '%d images scanned so far…', 'webp-generator' ),
 					/* translators: %d: number of images generated so far. */
-					'generatedSoFar'  => __( '%d images generated so far…', 'wp-webp-generator' ),
-					'missingNone'     => __( 'Every image already has a .webp version. Nothing to generate.', 'wp-webp-generator' ),
+					'generatedSoFar'  => __( '%d images generated so far…', 'webp-generator' ),
+					'missingNone'     => __( 'Every image already has a .webp version. Nothing to generate.', 'webp-generator' ),
 					/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB". */
-					'missingPlural'   => __( '%1$d images are missing a .webp version (%2$s).', 'wp-webp-generator' ),
+					'missingPlural'   => __( '%1$d images are missing a .webp version (%2$s).', 'webp-generator' ),
 					/* translators: 1: combined file size, e.g. "420 KB". */
-					'missingSingular' => __( '1 image is missing a .webp version (%2$s).', 'wp-webp-generator' ),
+					'missingSingular' => __( '1 image is missing a .webp version (%2$s).', 'webp-generator' ),
 					/* translators: %d: number of images. */
-					'generateDone'    => __( 'Done -- generated %d image(s).', 'wp-webp-generator' ),
-					'cacheCleared'    => __( 'Also cleared the page cache so these take effect right away.', 'wp-webp-generator' ),
-					'paused'          => __( 'Paused. Click "Generate" to pick up where this left off.', 'wp-webp-generator' ),
-					'vsOriginal'      => __( 'vs.', 'wp-webp-generator' ),
-					'folders'         => __( 'folders', 'wp-webp-generator' ),
-					'error'           => __( 'Something went wrong:', 'wp-webp-generator' ),
+					'generateDone'    => __( 'Done -- generated %d image(s).', 'webp-generator' ),
+					'cacheCleared'    => __( 'Also cleared the page cache so these take effect right away.', 'webp-generator' ),
+					'paused'          => __( 'Paused. Click "Generate" to pick up where this left off.', 'webp-generator' ),
+					'vsOriginal'      => __( 'vs.', 'webp-generator' ),
+					'folders'         => __( 'folders', 'webp-generator' ),
+					'error'           => __( 'Something went wrong:', 'webp-generator' ),
 				),
 			)
 		);
@@ -236,7 +236,7 @@ class WWG_Admin {
 		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
 
 		if ( ! current_user_can( self::CAPABILITY ) ) {
-			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'wp-webp-generator' ) ), 403 );
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
 		}
 
 		$mode        = ( isset( $_POST['mode'] ) && 'convert' === $_POST['mode'] ) ? 'convert' : 'scan';

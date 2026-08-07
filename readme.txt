@@ -1,4 +1,4 @@
-=== WP WebP Generator ===
+=== WebP Generator ===
 Contributors: abecoffman
 Tags: webp, image optimization, performance, media, images
 Requires at least: 6.0
@@ -12,7 +12,7 @@ Generates .webp versions of your images automatically, catches up your existing 
 
 == Description ==
 
-WP WebP Generator creates a `.webp` version of every image you upload — automatically, for the original file and every size WordPress generates — using Imagick or GD (no shell access or external binary required). New uploads are covered from the moment you activate the plugin.
+WebP Generator creates a `.webp` version of every image you upload — automatically, for the original file and every size WordPress generates — using Imagick or GD (no shell access or external binary required). New uploads are covered from the moment you activate the plugin.
 
 For everything uploaded *before* that, **Tools → WebP Generator** adds a simple Scan / Generate / Cancel tool:
 
@@ -21,7 +21,7 @@ For everything uploaded *before* that, **Tools → WebP Generator** adds a simpl
 
 = Serving the files =
 
-Generating `.webp` files is only half the job — browsers only get them if your server is configured to serve them instead of the original. WP WebP Generator can set this up for you with one click on Apache and LiteSpeed (both read the same `.htaccess`/mod_rewrite syntax). It's reversible any time, and only ever touches one clearly-marked block of your `.htaccess`, the same mechanism WordPress core uses for its own rewrite rules. On Nginx or IIS, the plugin links you straight to the official documentation for configuring the equivalent rule.
+Generating `.webp` files is only half the job — browsers only get them if your server is configured to serve them instead of the original. WebP Generator can set this up for you with one click on Apache and LiteSpeed (both read the same `.htaccess`/mod_rewrite syntax). It's reversible any time, and only ever touches one clearly-marked block of your `.htaccess`, the same mechanism WordPress core uses for its own rewrite rules. On Nginx or IIS, the plugin links you straight to the official documentation for configuring the equivalent rule.
 
 = Plays well with page caching =
 

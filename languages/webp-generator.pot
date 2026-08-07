@@ -2,118 +2,115 @@
 # This file is distributed under the GPL-2.0-or-later.
 msgid ""
 msgstr ""
-"Project-Id-Version: WP WebP Generator 1.9.0\n"
-"Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/wp-webp-generator\n"
+"Project-Id-Version: WebP Generator 1.9.0\n"
+"Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/webp-generator\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-08-06T16:00:53+00:00\n"
+"POT-Creation-Date: 2026-08-07T04:18:44+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
-"X-Domain: wp-webp-generator\n"
+"X-Domain: webp-generator\n"
 
 #. Plugin Name of the plugin
-#: wp-webp-generator.php
-msgid "WP WebP Generator"
-msgstr ""
-
-#. Description of the plugin
-#: wp-webp-generator.php
-msgid "Generates a .webp sibling for every size of newly uploaded JPEG/PNG images, and can install the Apache .htaccess rule that serves them to browsers that support it (falls back to a manual example for other servers). Also adds a Tools > WebP Generator admin screen to scan the existing media library for images still missing a .webp version and convert them on demand, and clears common page caches (Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, LiteSpeed Cache) when it generates new files."
-msgstr ""
-
-#. Author of the plugin
-#: wp-webp-generator.php
-msgid "Abe Coffman"
-msgstr ""
-
-#: includes/class-wwg-admin.php:131
-#: includes/class-wwg-admin.php:132
+#: webp-generator.php
+#: includes/class-wwg-admin.php:144
+#: includes/class-wwg-admin.php:145
 #: includes/views/admin-page.php:25
 msgid "WebP Generator"
 msgstr ""
 
-#: includes/class-wwg-admin.php:167
+#. Description of the plugin
+#: webp-generator.php
+msgid "Generates a .webp sibling for every size of newly uploaded JPEG/PNG images, and can install the Apache .htaccess rule that serves them to browsers that support it (falls back to a manual example for other servers). Also adds a Tools > WebP Generator admin screen to scan the existing media library for images still missing a .webp version and convert them on demand, and clears common page caches (Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, LiteSpeed Cache) when it generates new files."
+msgstr ""
+
+#. Author of the plugin
+#: webp-generator.php
+msgid "Abe Coffman"
+msgstr ""
+
+#: includes/class-wwg-admin.php:183
 msgid "Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced."
 msgstr ""
 
 #. translators: %s: folder path currently being scanned, e.g. "2024/03". Substituted client-side in admin.js.
-#: includes/class-wwg-admin.php:169
+#: includes/class-wwg-admin.php:185
 #, php-format
 msgid "Checking %s…"
 msgstr ""
 
 #. translators: %s: folder path currently being processed, e.g. "2024/03". Substituted client-side in admin.js.
-#: includes/class-wwg-admin.php:171
+#: includes/class-wwg-admin.php:187
 #, php-format
 msgid "Generating %s…"
 msgstr ""
 
-#: includes/class-wwg-admin.php:172
+#: includes/class-wwg-admin.php:188
 msgid "the uploads folder"
 msgstr ""
 
 #. translators: %d: number of images scanned so far.
-#: includes/class-wwg-admin.php:174
+#: includes/class-wwg-admin.php:190
 #, php-format
 msgid "%d images scanned so far…"
 msgstr ""
 
 #. translators: %d: number of images generated so far.
-#: includes/class-wwg-admin.php:176
+#: includes/class-wwg-admin.php:192
 #, php-format
 msgid "%d images generated so far…"
 msgstr ""
 
-#: includes/class-wwg-admin.php:177
+#: includes/class-wwg-admin.php:193
 msgid "Every image already has a .webp version. Nothing to generate."
 msgstr ""
 
 #. translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB".
-#: includes/class-wwg-admin.php:179
+#: includes/class-wwg-admin.php:195
 #, php-format
 msgid "%1$d images are missing a .webp version (%2$s)."
 msgstr ""
 
 #. translators: 1: combined file size, e.g. "420 KB".
-#: includes/class-wwg-admin.php:181
+#: includes/class-wwg-admin.php:197
 #, php-format
 msgid "1 image is missing a .webp version (%2$s)."
 msgstr ""
 
 #. translators: %d: number of images.
-#: includes/class-wwg-admin.php:183
+#: includes/class-wwg-admin.php:199
 #, php-format
 msgid "Done -- generated %d image(s)."
 msgstr ""
 
-#: includes/class-wwg-admin.php:184
+#: includes/class-wwg-admin.php:200
 msgid "Also cleared the page cache so these take effect right away."
 msgstr ""
 
-#: includes/class-wwg-admin.php:185
+#: includes/class-wwg-admin.php:201
 msgid "Paused. Click \"Generate\" to pick up where this left off."
 msgstr ""
 
-#: includes/class-wwg-admin.php:186
+#: includes/class-wwg-admin.php:202
 msgid "vs."
 msgstr ""
 
-#: includes/class-wwg-admin.php:187
+#: includes/class-wwg-admin.php:203
 msgid "folders"
 msgstr ""
 
-#: includes/class-wwg-admin.php:188
+#: includes/class-wwg-admin.php:204
 msgid "Something went wrong:"
 msgstr ""
 
-#: includes/class-wwg-admin.php:222
+#: includes/class-wwg-admin.php:239
 msgid "You do not have permission to do this."
 msgstr ""
 
-#: includes/class-wwg-generator.php:321
+#: includes/class-wwg-generator.php:325
 msgid "WP WebP Generator: neither Imagick nor GD on this server was compiled with WebP support, so new uploads are not getting .webp siblings generated."
 msgstr ""
 
@@ -125,130 +122,130 @@ msgstr ""
 msgid "WordPress creates a .webp version of every new image you upload automatically. Use this page to generate .webp versions for images uploaded before that started, and to set up your server to actually serve them."
 msgstr ""
 
-#: includes/views/admin-page.php:31
+#: includes/views/admin-page.php:32
 msgid "Settings saved."
 msgstr ""
 
-#: includes/views/admin-page.php:37
+#: includes/views/admin-page.php:39
 msgid ".htaccess updated -- the WebP rule is now active."
 msgstr ""
 
-#: includes/views/admin-page.php:38
+#: includes/views/admin-page.php:40
 msgid "Couldn't write to .htaccess. It may not be writable by PHP on this host -- use the manual rule below instead."
 msgstr ""
 
-#: includes/views/admin-page.php:39
+#: includes/views/admin-page.php:41
 msgid ".htaccess updated -- the WebP rule was removed."
 msgstr ""
 
-#: includes/views/admin-page.php:40
+#: includes/views/admin-page.php:42
 msgid "Couldn't write to .htaccess to remove the rule."
 msgstr ""
 
-#: includes/views/admin-page.php:52
+#: includes/views/admin-page.php:54
 msgid "Nothing here will work yet."
 msgstr ""
 
-#: includes/views/admin-page.php:53
+#: includes/views/admin-page.php:55
 msgid "Neither Imagick nor GD on this server was compiled with WebP support, so this plugin has no way to create .webp files. Ask your host to enable one, or switch to a PHP build that has it."
 msgstr ""
 
-#: includes/views/admin-page.php:60
+#: includes/views/admin-page.php:62
 msgid "Generate WebP Images"
 msgstr ""
 
-#: includes/views/admin-page.php:61
+#: includes/views/admin-page.php:63
 msgid "Scan your media library for images missing a .webp version, then generate them."
 msgstr ""
 
-#: includes/views/admin-page.php:67
+#: includes/views/admin-page.php:69
 msgid "Scan"
 msgstr ""
 
-#: includes/views/admin-page.php:70
+#: includes/views/admin-page.php:72
 msgid "Generate"
 msgstr ""
 
-#: includes/views/admin-page.php:73
+#: includes/views/admin-page.php:75
 msgid "Cancel"
 msgstr ""
 
-#: includes/views/admin-page.php:89
+#: includes/views/admin-page.php:91
 msgid "Failed"
 msgstr ""
 
-#: includes/views/admin-page.php:93
+#: includes/views/admin-page.php:95
 msgid "New size vs. originals"
 msgstr ""
 
-#: includes/views/admin-page.php:103
+#: includes/views/admin-page.php:105
 msgid "Rewrite Rules"
 msgstr ""
 
-#: includes/views/admin-page.php:104
+#: includes/views/admin-page.php:106
 msgid "Generating .webp files does nothing on its own -- your server needs a rule to serve them instead of the original when a browser supports it."
 msgstr ""
 
-#: includes/views/admin-page.php:108
+#: includes/views/admin-page.php:110
 msgid "Detected in your .htaccess already."
 msgstr ""
 
-#: includes/views/admin-page.php:112
+#: includes/views/admin-page.php:114
 msgid "Remove it"
 msgstr ""
 
 #. translators: %s: .htaccess path
-#: includes/views/admin-page.php:118
+#: includes/views/admin-page.php:120
 #, php-format
 msgid "Add this rule to %s automatically"
 msgstr ""
 
 #. translators: %s: detected server name, e.g. "Apache".
-#: includes/views/admin-page.php:124
+#: includes/views/admin-page.php:126
 #, php-format
 msgid "Detected %s. This only adds a clearly-marked block WordPress's own mechanism manages -- it can be removed the same way it was added, any time, and won't touch the rest of your .htaccess."
 msgstr ""
 
 #. translators: %s: detected server name, e.g. "Nginx".
-#: includes/views/admin-page.php:134
+#: includes/views/admin-page.php:136
 #, php-format
 msgid "This plugin can't configure %s automatically -- add the equivalent rule yourself using the example below."
 msgstr ""
 
 #. translators: %s: detected server name.
-#: includes/views/admin-page.php:142
+#: includes/views/admin-page.php:144
 #, php-format
 msgid "How to configure %s"
 msgstr ""
 
-#: includes/views/admin-page.php:149
+#: includes/views/admin-page.php:151
 msgid "Example rule for Apache (.htaccess)"
 msgstr ""
 
-#: includes/views/admin-page.php:155
+#: includes/views/admin-page.php:160
 msgid "Add near the top of your .htaccess, before any WordPress rewrite rules."
 msgstr ""
 
-#: includes/views/admin-page.php:158
+#: includes/views/admin-page.php:164
 msgid "On Nginx, IIS, or another server: same idea (serve the .webp sibling when it exists and the browser sends Accept: image/webp), different syntax."
 msgstr ""
 
-#: includes/views/admin-page.php:164
+#: includes/views/admin-page.php:170
 msgid "Settings"
 msgstr ""
 
-#: includes/views/admin-page.php:165
+#: includes/views/admin-page.php:171
 msgid "Applies to images converted from now on -- existing .webp files are never regenerated automatically."
 msgstr ""
 
-#: includes/views/admin-page.php:171
+#: includes/views/admin-page.php:177
 msgid "WebP quality"
 msgstr ""
 
-#: includes/views/admin-page.php:172
+#: includes/views/admin-page.php:178
 msgid "1-100. Higher looks better but produces larger files; 75 is a reasonable default."
 msgstr ""
 
-#: includes/views/admin-page.php:175
+#: includes/views/admin-page.php:181
 msgid "Save settings"
 msgstr ""

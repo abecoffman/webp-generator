@@ -72,7 +72,7 @@ class WWG_Htaccess {
 	 *                'unknown'.
 	 */
 	public static function detect_server() {
-		$software = isset( $_SERVER['SERVER_SOFTWARE'] ) ? strtolower( $_SERVER['SERVER_SOFTWARE'] ) : '';
+		$software = isset( $_SERVER['SERVER_SOFTWARE'] ) ? strtolower( sanitize_text_field( wp_unslash( $_SERVER['SERVER_SOFTWARE'] ) ) ) : '';
 
 		if ( false !== strpos( $software, 'litespeed' ) ) {
 			return 'litespeed';

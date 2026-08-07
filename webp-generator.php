@@ -1,11 +1,21 @@
 <?php
 /**
- * Plugin Name: WP WebP Generator
+ * Plugin Name: WebP Generator
  * Description: Generates a .webp sibling for every size of newly uploaded JPEG/PNG images, and can install the Apache .htaccess rule that serves them to browsers that support it (falls back to a manual example for other servers). Also adds a Tools > WebP Generator admin screen to scan the existing media library for images still missing a .webp version and convert them on demand, and clears common page caches (Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, LiteSpeed Cache) when it generates new files.
  * Version:     1.9.0
  * Author:      Abe Coffman
  * License:     GPL-2.0-or-later
- * Text Domain: wp-webp-generator
+ * Text Domain: webp-generator
+ *
+ * Internal PHP identifiers (classes, constants, functions, option/hook
+ * names) keep the historical WWG_/wwg_ prefix ("WP WebP Generator", this
+ * plugin's working name before "wp" turned out to be a restricted term
+ * for the public-facing plugin Name/Slug -- see readme.txt). That's a
+ * purely cosmetic mismatch with the current display name; the prefix
+ * itself is still unique/non-colliding, and WordPress.org's Plugin
+ * Check tool only flags the Name/Slug, not internal code identifiers,
+ * so renaming those wasn't necessary and would have been a much larger,
+ * riskier change for no compliance benefit.
  *
  * @package WWG
  */
@@ -36,14 +46,3 @@ function wwg_init() {
 	}
 }
 add_action( 'plugins_loaded', 'wwg_init' );
-
-/**
- * Load translations. WordPress.org auto-loads translations for
- * plugins it hosts as of WP 4.6, so this is a no-op there -- it's for
- * the manual/GitHub-zip install path (see README.md), where nothing
- * else would load a .mo file from /languages.
- */
-function wwg_load_textdomain() {
-	load_plugin_textdomain( 'wp-webp-generator', false, dirname( plugin_basename( WWG_FILE ) ) . '/languages' );
-}
-add_action( 'init', 'wwg_load_textdomain' );

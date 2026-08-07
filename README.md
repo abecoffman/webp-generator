@@ -1,4 +1,4 @@
-# WP WebP Generator
+# WebP Generator
 
 Generate `.webp` versions of your WordPress media library, automatically for new uploads and on demand for everything already there — plus a one-click way to actually get your server to serve them.
 
@@ -18,7 +18,7 @@ See [`.wordpress-org/screenshot-*.png`](.wordpress-org/) or the plugin's listing
 
 **From WordPress.org** (once approved): Plugins → Add New → search "WebP Generator" → Install → Activate.
 
-**Manual install**: download the [latest release](../../releases/latest), upload the zip via Plugins → Add New → Upload Plugin, then activate. Or clone/copy this repo into `wp-content/plugins/wp-webp-generator/`.
+**Manual install**: download the [latest release](../../releases/latest), upload the zip via Plugins → Add New → Upload Plugin, then activate. Or clone/copy this repo into `wp-content/plugins/webp-generator/`.
 
 After activating, visit **Tools → WebP Generator** to scan your existing library and set up server-side serving.
 
@@ -37,6 +37,8 @@ composer run test   # unit tests
 ```
 
 No build step — `assets/admin.js`/`admin.css` are plain, unbundled files.
+
+Internal PHP identifiers (classes, constants, hooks) use a `WWG_`/`wwg_` prefix from this plugin's working name before "wp" turned out to be a restricted term for the public-facing plugin name/slug on WordPress.org. Cosmetic only — the prefix itself is still valid and collision-free, so it wasn't worth the risk of a mechanical rename across the whole codebase.
 
 ## Documentation & support
 

@@ -16,6 +16,13 @@ class HtaccessTest extends TestCase {
 	protected function set_up() {
 		parent::set_up();
 		unset( $_SERVER['SERVER_SOFTWARE'] );
+
+		// detect_server() unslashes/sanitizes $_SERVER['SERVER_SOFTWARE'];
+		// stub both as pass-throughs since these fixtures never contain
+		// slashes or markup to strip -- only the real behavior under test
+		// (the substring matching) matters here.
+		Functions\when( 'wp_unslash' )->returnArg();
+		Functions\when( 'sanitize_text_field' )->returnArg();
 	}
 
 	/**

@@ -21,7 +21,7 @@ if ( ! defined( 'WWG_PATH' ) ) {
 	define( 'WWG_PATH', dirname( __DIR__ ) . '/' );
 }
 if ( ! defined( 'WWG_FILE' ) ) {
-	define( 'WWG_FILE', WWG_PATH . 'wp-webp-generator.php' );
+	define( 'WWG_FILE', WWG_PATH . 'webp-generator.php' );
 }
 if ( ! defined( 'WWG_VERSION' ) ) {
 	define( 'WWG_VERSION', 'test' );

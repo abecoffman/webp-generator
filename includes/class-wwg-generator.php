@@ -322,7 +322,7 @@ class WWG_Generator {
 		}
 
 		echo '<div class="notice notice-warning"><p>' .
-			esc_html__( 'WP WebP Generator: neither Imagick nor GD on this server was compiled with WebP support, so new uploads are not getting .webp siblings generated.', 'wp-webp-generator' ) .
+			esc_html__( 'WP WebP Generator: neither Imagick nor GD on this server was compiled with WebP support, so new uploads are not getting .webp siblings generated.', 'webp-generator' ) .
 			'</p></div>';
 	}
 }

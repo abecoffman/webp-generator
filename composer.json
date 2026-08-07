@@ -1,5 +1,5 @@
 {
-    "name": "abecoffman/wp-webp-generator",
+    "name": "abecoffman/webp-generator",
     "description": "Generates .webp images for WordPress automatically, plus a bulk-conversion tool and one-click server setup.",
     "type": "wordpress-plugin",
     "license": "GPL-2.0-or-later",
