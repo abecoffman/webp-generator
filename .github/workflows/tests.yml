@@ -33,3 +33,17 @@ jobs:
           coverage: none
       - run: composer install --no-progress
       - run: composer run test
+
+  plugin-check:
+    name: WordPress Plugin Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Same exclusions as .distignore -- checks the plugin the way it'll
+      # actually ship, not the dev repo (tests/ deliberately uses eval()
+      # and direct filesystem calls that Plugin Check rightly flags, but
+      # none of that reaches WordPress.org's SVN distribution).
+      - uses: wordpress/plugin-check-action@v1
+        with:
+          exclude-directories: 'tests,.github,vendor,.wordpress-org,.git'
+          exclude-files: 'composer.json,composer.lock,.phpcs.xml.dist,.phpunit.result.cache,phpunit.xml.dist,.gitignore,.distignore,README.md'
