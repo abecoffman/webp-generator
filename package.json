@@ -1,0 +1,12 @@
+{
+  "name": "webp-generator-e2e",
+  "private": true,
+  "description": "E2E test tier (Playwright Test) against the plugin-sandbox WordPress install. Local-only, not part of the CI matrix -- see the composer-based unit/integration tiers for what runs there.",
+  "scripts": {
+    "pretest:e2e": "bash ../../plugin-sandbox/bin/reset-e2e-fixtures.sh",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}

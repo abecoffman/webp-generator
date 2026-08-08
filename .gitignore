@@ -23,6 +23,12 @@ composer.lock
 # Release zips built by bin/build-zip.sh
 /dist/
 
+# E2E tier (Playwright Test) -- saved login session, npm deps, HTML reports
+/node_modules/
+/tests/e2e/.auth/
+/playwright-report/
+/test-results/
+
 # OS cruft
 .DS_Store
 
