@@ -1,0 +1,13 @@
+{
+    "name": "abecoffman/webp-generator-integration-tests",
+    "description": "Isolated Composer context for the integration test tier. Kept separate from the plugin's own root composer.json deliberately: WordPress core's own PHPUnit test library (tests/phpunit/includes/abstract-testcase.php, even on trunk) still calls a PHPUnit\\Util\\Test method PHPUnit 10 removed, so WP_UnitTestCase-based tests require PHPUnit 9.6 specifically -- pinning the *root* composer.json to 9.6 would silently drop this project's deliberate PHP 8.3/PHPUnit 10 CI coverage for the unit tier. This context only ever runs locally (see the main plan), never in CI, so it can stay pinned to whatever WP core's test library actually needs.",
+    "type": "project",
+    "license": "GPL-2.0-or-later",
+    "require-dev": {
+        "phpunit/phpunit": "^9.6",
+        "yoast/phpunit-polyfills": "^2.0"
+    },
+    "config": {
+        "allow-plugins": false
+    }
+}

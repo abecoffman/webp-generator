@@ -33,6 +33,7 @@
     "scripts": {
         "phpcs": "phpcs",
         "phpcbf": "phpcbf",
-        "test": "phpunit"
+        "test": "phpunit",
+        "test:integration": "cd tests/integration && composer install --quiet && WP_TESTS_PHPUNIT_POLYFILLS_PATH=\"$(pwd)/vendor/yoast/phpunit-polyfills\" vendor/bin/phpunit"
     }
 }

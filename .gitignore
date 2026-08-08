@@ -9,6 +9,13 @@
 /vendor/
 composer.lock
 
+# Integration tier's own isolated Composer context (pinned to PHPUnit
+# 9.6 -- see tests/integration/composer.json for why) -- same reasoning
+# as the root vendor/ above, not tied to the CI matrix since this tier
+# is local-only.
+/tests/integration/vendor/
+/tests/integration/composer.lock
+
 # Test artifacts
 .phpunit.result.cache
 /tests/tmp/
