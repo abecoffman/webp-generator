@@ -1,33 +1,48 @@
 /**
- * Drives the Tools > WebP Generator "Generate WebP Images" panel as an
- * explicit 3-button state machine (Scan / Generate / Cancel), each step
- * one bounded batch against WWG_Admin's AJAX endpoint:
+ * Drives the Tools > WebP Generator "Generate WebP Images" panel.
  *
- *  1. Only "Scan" starts enabled.
+ * Scan is a small, bounded client-driven loop: JS calls WWG_Admin's AJAX
+ * endpoint, gets a cursor back, calls again, until done.
+ *
+ * Generate is different: it runs as a WP-Cron background job (see
+ * WWG_Job) so it keeps going even if this tab closes. This script only
+ * *observes* that job -- starts it, polls its status, renders whatever
+ * it reports -- it never drives the work itself the way Scan does.
+ * That's also what makes page load able to resume mid-run: the state
+ * this boots from (`wwgAdmin.jobState`) is the server's, not something
+ * this script has to have built up itself in the current pageview.
+ *
+ *  1. Only "Scan" starts enabled (unless a Generate job is already
+ *     running/paused/done from a previous pageview -- see bootGenerate()).
  *  2. Scan runs, live count climbing, until it's walked the whole
  *     uploads tree once.
  *  3. Scan finishes: shows how many images are missing a .webp, enables
  *     "Generate", disables "Scan" (one scan per page load).
- *  5. Generate runs, live count climbing; enables "Cancel", disables
- *     "Generate".
- *  6. Cancel stops the batch loop and *pauses* -- current progress and
- *     cursor position are kept, not discarded -- and re-enables
- *     "Generate" to resume from exactly where it left off.
- *  7. Generate finishing naturally (not cancelled) disables every
- *     button and shows the final summary.
+ *  4. Generate starts the background job and polls it; enables "Cancel",
+ *     disables "Generate". Reloading the page while this is running
+ *     resumes polling immediately, no click needed.
+ *  5. Cancel pauses the job server-side -- progress and cursor are kept,
+ *     not discarded -- and re-enables "Generate" to resume from exactly
+ *     where it left off, even across a reload.
+ *  6. The job finishing naturally (not cancelled) disables every button
+ *     and shows the final summary -- also true immediately on page load
+ *     if it finished while this tab was elsewhere.
  */
 ( function () {
 	'use strict';
 
 	var els = {};
-	var running = false;
-	var cancelRequested = false;
-	var webpSupported = true;
+	var scanRunning = false;
+	var jobState = null;
+	var pollTimeout = null;
 
-	// Generate is resumable across Cancel/Generate cycles, so its totals
-	// and cursor live outside any single run and only get created once.
-	var generateTotals = null;
-	var generateCursor = { dirIndex: 0, fileOffset: 0 };
+	// Scan's missing-image count, needed once: as the target Generate's
+	// progress bar is sized against when it starts a fresh job. Only
+	// relevant for a *fresh* start -- Generate stays disabled until Scan
+	// finishes in the same pageview, so this is always set by the time
+	// it's read; resuming a paused/already-running job (from this or an
+	// earlier pageview) uses the target the server already recorded.
+	var scanMissingCount = 0;
 
 	document.addEventListener( 'DOMContentLoaded', function () {
 		els.panel = document.querySelector( '.wwg-panel' );
@@ -39,18 +54,18 @@
 		els.progressLabel = els.progress.querySelector( '.wwg-progress-label' );
 		els.summary = document.getElementById( 'wwg-summary' );
 		els.convertResults = document.getElementById( 'wwg-convert-results' );
+		els.failures = document.getElementById( 'wwg-failures' );
+		els.failuresCount = document.getElementById( 'wwg-failures-count' );
+		els.failuresList = document.getElementById( 'wwg-failures-list' );
 		els.log = document.getElementById( 'wwg-log' );
 
-		webpSupported = els.panel.getAttribute( 'data-webp-supported' ) === '1';
+		jobState = wwgAdmin.jobState;
 
 		els.scanBtn.addEventListener( 'click', runScan );
-		els.generateBtn.addEventListener( 'click', function () {
-			var resuming = generateTotals !== null;
-			if ( resuming || window.confirm( wwgAdmin.strings.confirmGenerate ) ) {
-				runGenerate();
-			}
-		} );
+		els.generateBtn.addEventListener( 'click', onGenerateClick );
 		els.cancelBtn.addEventListener( 'click', requestCancel );
+
+		bootGenerate();
 	} );
 
 	function formatBytes( bytes ) {
@@ -62,25 +77,10 @@
 		return ( bytes / Math.pow( 1024, i ) ).toFixed( i === 0 ? 0 : 1 ) + ' ' + units[ i ];
 	}
 
-	function freshTotals() {
-		return {
-			dirsDone: 0,
-			totalDirs: 0,
-			scanned: 0,
-			missing: 0,
-			originalBytes: 0,
-			converted: 0,
-			failed: 0,
-			webpBytes: 0,
-			cacheCleared: false,
-		};
-	}
-
-	function requestBatch( mode, dirIndex, fileOffset ) {
+	function requestBatch( dirIndex, fileOffset ) {
 		var body = new FormData();
 		body.append( 'action', wwgAdmin.action );
 		body.append( 'nonce', wwgAdmin.nonce );
-		body.append( 'mode', mode );
 		body.append( 'dir_index', dirIndex );
 		body.append( 'file_offset', fileOffset );
 
@@ -90,52 +90,33 @@
 			} );
 	}
 
-	function applyStats( totals, data ) {
-		totals.dirsDone = data.dir_index;
-		totals.totalDirs = data.total_dirs;
-		if ( data.stats ) {
-			totals.scanned += data.stats.scanned;
-			totals.missing += data.stats.missing;
-			totals.originalBytes += data.stats.original_bytes;
-			totals.converted += data.stats.converted;
-			totals.failed += data.stats.failed;
-			totals.webpBytes += data.stats.webp_bytes;
+	function requestJobAction( action, extraFields ) {
+		var body = new FormData();
+		body.append( 'action', action );
+		body.append( 'nonce', wwgAdmin.nonce );
+		if ( extraFields ) {
+			Object.keys( extraFields ).forEach( function ( key ) {
+				body.append( key, extraFields[ key ] );
+			} );
 		}
-		if ( data.cache_cleared ) {
-			totals.cacheCleared = true;
-		}
+
+		return fetch( wwgAdmin.ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body } )
+			.then( function ( response ) {
+				return response.json();
+			} );
 	}
 
-	function updateProgressBar( data ) {
-		var pct = data.total_dirs ? Math.min( 100, Math.round( ( data.dir_index / data.total_dirs ) * 100 ) ) : 100;
-		els.progressFill.style.width = pct + '%';
-		els.progressLabel.textContent = pct + '% (' + data.dir_index + ' / ' + data.total_dirs + ' ' + wwgAdmin.strings.folders + ')';
-	}
+	// ---- Scan: unchanged, small bounded client-driven loop ----
 
-	function updateLog( mode, data ) {
-		if ( data.done ) {
-			els.log.textContent = '';
-			return;
-		}
-		var template = mode === 'convert' ? wwgAdmin.strings.converting : wwgAdmin.strings.checking;
-		var label = data.dir ? data.dir : wwgAdmin.strings.uploadsRoot;
-		els.log.textContent = template.replace( '%s', label );
+	function freshScanTotals() {
+		return { scanned: 0, missing: 0, originalBytes: 0 };
 	}
-
-	function renderGenerateResults( totals ) {
-		els.convertResults.hidden = false;
-		document.getElementById( 'wwg-c-failed' ).textContent = totals.failed;
-		document.getElementById( 'wwg-c-bytes' ).textContent =
-			formatBytes( totals.webpBytes ) + ' ' + wwgAdmin.strings.vsOriginal + ' ' + formatBytes( totals.originalBytes );
-	}
-
-	// ---- Step 1-3: Scan ----
 
 	function runScan() {
-		if ( running ) {
+		if ( scanRunning ) {
 			return;
 		}
-		running = true;
+		scanRunning = true;
 
 		els.scanBtn.disabled = true;
 		els.generateBtn.disabled = true;
@@ -147,11 +128,11 @@
 		els.log.textContent = '';
 		els.summary.textContent = wwgAdmin.strings.scannedSoFar.replace( '%d', 0 );
 
-		scanStep( freshTotals(), 0, 0 );
+		scanStep( freshScanTotals(), 0, 0 );
 	}
 
 	function scanStep( totals, dirIndex, fileOffset ) {
-		requestBatch( 'scan', dirIndex, fileOffset ).then( function ( json ) {
+		requestBatch( dirIndex, fileOffset ).then( function ( json ) {
 			if ( ! json.success ) {
 				handleRequestFailure( json );
 				els.scanBtn.disabled = false; // let them retry a failed scan.
@@ -159,13 +140,25 @@
 			}
 
 			var data = json.data;
-			applyStats( totals, data );
-			updateProgressBar( data );
-			updateLog( 'scan', data );
+			totals.scanned += data.stats.scanned;
+			totals.missing += data.stats.missing;
+			totals.originalBytes += data.stats.original_bytes;
+
+			var pct = data.total_dirs ? Math.min( 100, Math.round( ( data.dir_index / data.total_dirs ) * 100 ) ) : 100;
+			els.progressFill.style.width = pct + '%';
+			els.progressLabel.textContent = pct + '% (' + data.dir_index + ' / ' + data.total_dirs + ' ' + wwgAdmin.strings.folders + ')';
+
+			if ( data.done ) {
+				els.log.textContent = '';
+			} else {
+				var label = data.dir ? data.dir : wwgAdmin.strings.uploadsRoot;
+				els.log.textContent = wwgAdmin.strings.checking.replace( '%s', label );
+			}
+
 			els.summary.textContent = wwgAdmin.strings.scannedSoFar.replace( '%d', totals.scanned );
 
 			if ( data.done ) {
-				running = false;
+				scanRunning = false;
 				finishScan( totals );
 				return;
 			}
@@ -186,44 +179,32 @@
 			els.summary.textContent = template
 				.replace( '%1$d', totals.missing )
 				.replace( '%2$s', formatBytes( totals.originalBytes ) );
-			els.generateBtn.disabled = ! webpSupported;
+			els.generateBtn.disabled = els.panel.getAttribute( 'data-webp-supported' ) !== '1';
+			scanMissingCount = totals.missing;
 		}
 		// "Scan" stays disabled -- one scan per page load, by design;
 		// reload the page for a fresh count.
 	}
 
-	// ---- Steps 5-7: Generate / Cancel ----
+	// ---- Generate: observes a background job, doesn't drive it ----
 
-	function runGenerate() {
-		if ( running ) {
+	function onGenerateClick() {
+		if ( jobState.status === 'running' ) {
 			return;
 		}
-		running = true;
-		cancelRequested = false;
+		var resuming = jobState.status === 'paused';
+		if ( resuming || window.confirm( wwgAdmin.strings.confirmGenerate ) ) {
+			startGenerateJob();
+		}
+	}
 
+	function startGenerateJob() {
 		els.generateBtn.disabled = true;
 		els.cancelBtn.disabled = false;
 		els.log.textContent = '';
+		els.progress.hidden = false;
 
-		if ( ! generateTotals ) {
-			generateTotals = freshTotals();
-			els.progress.hidden = false;
-			els.progressFill.style.width = '0%';
-			els.progressLabel.textContent = '';
-		}
-		// Resuming after a pause: progress bar/label are left exactly as
-		// they were, not reset.
-
-		generateStep( generateCursor.dirIndex, generateCursor.fileOffset );
-	}
-
-	function generateStep( dirIndex, fileOffset ) {
-		if ( cancelRequested ) {
-			pauseGenerate( dirIndex, fileOffset );
-			return;
-		}
-
-		requestBatch( 'convert', dirIndex, fileOffset ).then( function ( json ) {
+		requestJobAction( wwgAdmin.jobActions.start, { total_missing: scanMissingCount } ).then( function ( json ) {
 			if ( ! json.success ) {
 				handleRequestFailure( json );
 				els.generateBtn.disabled = false;
@@ -231,27 +212,9 @@
 				return;
 			}
 
-			var data = json.data;
-			applyStats( generateTotals, data );
-			updateProgressBar( data );
-			updateLog( 'convert', data );
-			renderGenerateResults( generateTotals );
-			els.summary.textContent = wwgAdmin.strings.generatedSoFar.replace( '%d', generateTotals.converted );
-
-			generateCursor = { dirIndex: data.dir_index, fileOffset: data.file_offset };
-
-			if ( data.done ) {
-				running = false;
-				finishGenerate();
-				return;
-			}
-
-			if ( cancelRequested ) {
-				pauseGenerate( data.dir_index, data.file_offset );
-				return;
-			}
-
-			generateStep( data.dir_index, data.file_offset );
+			jobState = json.data;
+			renderJobState();
+			startPolling();
 		} ).catch( function ( err ) {
 			handleNetworkFailure( err );
 			els.generateBtn.disabled = false;
@@ -259,43 +222,162 @@
 		} );
 	}
 
-	function requestCancel() {
-		if ( ! running ) {
+	function startPolling() {
+		if ( pollTimeout ) {
 			return;
 		}
-		cancelRequested = true;
-		// Prevent repeat clicks while the in-flight request finishes --
-		// the pause itself happens as soon as that response lands.
-		els.cancelBtn.disabled = true;
+		pollOnce();
 	}
 
-	function pauseGenerate( dirIndex, fileOffset ) {
-		running = false;
-		generateCursor = { dirIndex: dirIndex, fileOffset: fileOffset };
+	function stopPolling() {
+		if ( pollTimeout ) {
+			clearTimeout( pollTimeout );
+			pollTimeout = null;
+		}
+	}
+
+	function pollOnce() {
+		requestJobAction( wwgAdmin.jobActions.status ).then( function ( json ) {
+			if ( ! json.success ) {
+				handleRequestFailure( json );
+				return;
+			}
+
+			jobState = json.data;
+			renderJobState();
+
+			if ( jobState.status === 'running' ) {
+				pollTimeout = setTimeout( pollOnce, 1500 );
+			} else {
+				pollTimeout = null;
+				if ( jobState.status === 'done' ) {
+					renderDoneUI();
+				}
+			}
+		} ).catch( function ( err ) {
+			handleNetworkFailure( err );
+			pollTimeout = null;
+		} );
+	}
+
+	function updateGenerateProgressBar() {
+		var target = jobState.total_missing;
+		var processed = Math.min( jobState.stats.converted + jobState.stats.failed, target || 0 );
+		var pct = target ? Math.min( 100, Math.round( ( processed / target ) * 100 ) ) : 100;
+		els.progressFill.style.width = pct + '%';
+		els.progressLabel.textContent = pct + '% (' + processed + ' / ' + target + ' ' + wwgAdmin.strings.images + ')';
+	}
+
+	function renderFailures() {
+		var failures = jobState.stats.failures;
+		if ( ! failures.length ) {
+			return;
+		}
+		els.failures.hidden = false;
+		els.failuresCount.textContent = failures.length;
+
+		// Keep the DOM light on a run with hundreds of failures -- the
+		// count above already reflects the true total, this list is for
+		// spot-checking specific files, not an exhaustive report.
+		var toShow = failures.slice( -50 );
+		els.failuresList.innerHTML = '';
+		toShow.forEach( function ( failure ) {
+			var li = document.createElement( 'li' );
+			li.textContent = failure.file + ': ' + failure.error;
+			els.failuresList.appendChild( li );
+		} );
+	}
+
+	function renderJobState() {
+		updateGenerateProgressBar();
+		renderFailures();
+
+		els.convertResults.hidden = false;
+		document.getElementById( 'wwg-c-failed' ).textContent = jobState.stats.failed;
+		document.getElementById( 'wwg-c-bytes' ).textContent =
+			formatBytes( jobState.stats.webp_bytes ) + ' ' + wwgAdmin.strings.vsOriginal + ' ' + formatBytes( jobState.stats.original_bytes );
+
+		els.summary.textContent = wwgAdmin.strings.generatedSoFar.replace( '%d', jobState.stats.converted );
+
+		if ( jobState.status === 'running' && jobState.current_dir ) {
+			els.log.textContent = wwgAdmin.strings.converting.replace( '%s', jobState.current_dir );
+		}
+	}
+
+	function renderPausedUI() {
+		stopPolling();
 		els.generateBtn.disabled = false;
 		els.cancelBtn.disabled = true;
 		els.log.textContent = wwgAdmin.strings.paused;
+		renderJobState();
 		// Progress bar / summary are left exactly where they were --
 		// paused, not reset or hidden.
 	}
 
-	function finishGenerate() {
+	function renderDoneUI() {
+		stopPolling();
 		els.scanBtn.disabled = true;
 		els.generateBtn.disabled = true;
 		els.cancelBtn.disabled = true;
+		els.progress.hidden = false;
+		renderJobState();
 
-		els.log.textContent = wwgAdmin.strings.generateDone.replace( '%d', generateTotals.converted )
-			+ ( generateTotals.failed > 0 ? ' (' + generateTotals.failed + ' failed -- see error log)' : '' )
-			+ ( generateTotals.cacheCleared ? ' ' + wwgAdmin.strings.cacheCleared : '' );
+		els.log.textContent = wwgAdmin.strings.generateDone.replace( '%d', jobState.stats.converted )
+			+ ( jobState.stats.failed > 0 ? ' ' + wwgAdmin.strings.failedSummary.replace( '%d', jobState.stats.failed ) : '' )
+			+ ( jobState.cache_cleared ? ' ' + wwgAdmin.strings.cacheCleared : '' );
+	}
+
+	function requestCancel() {
+		if ( jobState.status !== 'running' ) {
+			return;
+		}
+		// Prevent repeat clicks while the in-flight request finishes.
+		els.cancelBtn.disabled = true;
+
+		requestJobAction( wwgAdmin.jobActions.cancel ).then( function ( json ) {
+			if ( ! json.success ) {
+				handleRequestFailure( json );
+				els.cancelBtn.disabled = false;
+				return;
+			}
+
+			jobState = json.data;
+			renderPausedUI();
+		} ).catch( function ( err ) {
+			handleNetworkFailure( err );
+			els.cancelBtn.disabled = false;
+		} );
+	}
+
+	/**
+	 * Called once on page load -- makes the panel reflect whatever the
+	 * background job's actual state is, instead of always booting to a
+	 * blank "click Generate" screen. This is what lets a mid-run reload,
+	 * or coming back after the job finished elsewhere, show up correctly
+	 * with no click required.
+	 */
+	function bootGenerate() {
+		if ( jobState.status === 'running' ) {
+			els.generateBtn.disabled = true;
+			els.cancelBtn.disabled = false;
+			els.progress.hidden = false;
+			renderJobState();
+			startPolling();
+		} else if ( jobState.status === 'paused' ) {
+			els.progress.hidden = false;
+			renderPausedUI();
+		} else if ( jobState.status === 'done' ) {
+			renderDoneUI();
+		}
+		// 'idle': today's default boot state -- Generate stays disabled
+		// until Scan finishes (see finishScan()).
 	}
 
 	function handleRequestFailure( json ) {
-		running = false;
 		els.log.textContent = wwgAdmin.strings.error + ' ' + ( ( json.data && json.data.message ) || '' );
 	}
 
 	function handleNetworkFailure( err ) {
-		running = false;
 		els.log.textContent = wwgAdmin.strings.error + ' ' + err;
 	}
 } )();

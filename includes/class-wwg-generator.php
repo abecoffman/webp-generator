@@ -40,6 +40,17 @@ class WWG_Generator {
 	const DEFAULT_QUALITY = 75;
 
 	/**
+	 * Human-readable reason the most recent failed conversion attempt
+	 * failed, set by convert_with_imagick()/convert_with_gd() and read
+	 * back by ensure_webp() -- an instance property rather than a return
+	 * value so the `convert_with_imagick() || convert_with_gd()`
+	 * short-circuit in ensure_webp() can stay a one-liner.
+	 *
+	 * @var string
+	 */
+	private $last_error = '';
+
+	/**
 	 * Register hooks.
 	 */
 	public function init() {
@@ -149,17 +160,25 @@ class WWG_Generator {
 	 *     @type int    $webp_bytes Size of the resulting .webp file.
 	 *                              Only present when status is 'created' or
 	 *                              'exists'.
+	 *     @type string $error      Human-readable reason. Present for
+	 *                              every status except 'created'/'exists'.
 	 * }
 	 */
 	public function ensure_webp( $source_path ) {
 		$webp_path = $this->webp_path_for( $source_path );
 
 		if ( ! $webp_path ) {
-			return array( 'status' => 'unsupported' );
+			return array(
+				'status' => 'unsupported',
+				'error'  => __( 'Not a supported image type (only .jpg/.jpeg/.png are converted).', 'webp-generator' ),
+			);
 		}
 
 		if ( ! file_exists( $source_path ) ) {
-			return array( 'status' => 'missing_source' );
+			return array(
+				'status' => 'missing_source',
+				'error'  => __( 'The source file no longer exists.', 'webp-generator' ),
+			);
 		}
 
 		if ( file_exists( $webp_path ) ) {
@@ -170,8 +189,13 @@ class WWG_Generator {
 		}
 
 		if ( ! $this->has_webp_support() ) {
-			return array( 'status' => 'unsupported_backend' );
+			return array(
+				'status' => 'unsupported_backend',
+				'error'  => __( 'Neither Imagick nor GD on this server was compiled with WebP support.', 'webp-generator' ),
+			);
 		}
+
+		$this->last_error = '';
 
 		// Imagick first: it copes with CMYK-colorspace JPEGs better than
 		// GD, which shares the same libjpeg decoder that some encoders
@@ -187,7 +211,10 @@ class WWG_Generator {
 			);
 		}
 
-		return array( 'status' => 'failed' );
+		return array(
+			'status' => 'failed',
+			'error'  => $this->last_error ? $this->last_error : __( 'Unknown error.', 'webp-generator' ),
+		);
 	}
 
 	/**
@@ -214,8 +241,14 @@ class WWG_Generator {
 			$image->clear();
 			$image->destroy();
 
+			if ( ! $result ) {
+				$this->last_error = __( 'Imagick::writeImage() returned false.', 'webp-generator' );
+			}
+
 			return (bool) $result;
 		} catch ( Exception $e ) {
+			/* translators: %s: the underlying Imagick exception message. */
+			$this->last_error = sprintf( __( 'Imagick: %s', 'webp-generator' ), $e->getMessage() );
 			return false;
 		}
 	}
@@ -247,6 +280,7 @@ class WWG_Generator {
 		}
 
 		if ( ! $image ) {
+			$this->last_error = __( 'GD could not read the source image (corrupt file, or an unsupported JPEG/PNG variant).', 'webp-generator' );
 			return false;
 		}
 
@@ -254,6 +288,10 @@ class WWG_Generator {
 		// No imagedestroy() call: GD images have been garbage-collected
 		// objects since PHP 8.0, and calling it is a deprecation warning
 		// as of PHP 8.5. $image goes out of scope on return regardless.
+
+		if ( ! $result ) {
+			$this->last_error = __( 'GD imagewebp() failed (possibly out of memory).', 'webp-generator' );
+		}
 
 		return (bool) $result;
 	}

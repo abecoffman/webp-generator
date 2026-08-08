@@ -12,10 +12,11 @@
  *   it" button, not a side effect of deleting the plugin.
  *
  * WordPress runs this file standalone, without loading the rest of the
- * plugin, so the option/transient keys below are hardcoded rather than
- * referencing the classes' own constants -- keep them in sync with
- * WWG_Generator::OPTION_QUALITY (includes/class-wwg-generator.php) and
- * the transient keys used in includes/class-wwg-admin.php.
+ * plugin, so the option/transient/cron-hook keys below are hardcoded
+ * rather than referencing the classes' own constants -- keep them in
+ * sync with WWG_Generator::OPTION_QUALITY (includes/class-wwg-generator.php)
+ * and the transient/cron-hook keys used in includes/class-wwg-admin.php
+ * and includes/class-wwg-job.php.
  *
  * @package WWG
  */
@@ -28,7 +29,10 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 
 delete_option( 'wwg_quality' );
 delete_transient( 'wwg_scan_dirs' );
-delete_transient( 'wwg_convert_run_tally' );
+delete_transient( 'wwg_convert_run_tally' ); // Stale key from before the Generate job moved to WP-Cron -- kept here for anyone upgrading from that version.
+delete_transient( 'wwg_job_state' );
+delete_transient( 'wwg_job_lock' );
+wp_clear_scheduled_hook( 'wwg_process_job_tick' );
 
 // Site-wide options/transients on multisite installs.
 if ( is_multisite() ) {
@@ -40,6 +44,9 @@ if ( is_multisite() ) {
 		delete_option( 'wwg_quality' );
 		delete_transient( 'wwg_scan_dirs' );
 		delete_transient( 'wwg_convert_run_tally' );
+		delete_transient( 'wwg_job_state' );
+		delete_transient( 'wwg_job_lock' );
+		wp_clear_scheduled_hook( 'wwg_process_job_tick' );
 
 		restore_current_blog();
 	}

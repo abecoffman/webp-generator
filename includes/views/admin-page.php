@@ -96,6 +96,14 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 				</div>
 			</div>
 
+			<details class="wwg-failures" id="wwg-failures" hidden>
+				<summary>
+					<?php esc_html_e( 'Failed conversions', 'webp-generator' ); ?>
+					(<span id="wwg-failures-count">0</span>)
+				</summary>
+				<ul class="wwg-failures-list" id="wwg-failures-list"></ul>
+			</details>
+
 			<p class="wwg-log" id="wwg-log" aria-live="polite"></p>
 		</div>
 	</div>

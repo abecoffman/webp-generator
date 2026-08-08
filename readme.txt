@@ -4,7 +4,7 @@ Tags: webp, image optimization, performance, media, images
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.9.0
+Stable tag: 1.10.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -17,7 +17,7 @@ WebP Generator creates a `.webp` version of every image you upload — automatic
 For everything uploaded *before* that, **Tools → WebP Generator** adds a simple Scan / Generate / Cancel tool:
 
 * **Scan** reports how many images in your media library are missing a `.webp` version, and how much that adds up to, before anything is written.
-* **Generate** converts them, with a live progress bar and running count. It's resumable: batches are small and bounded so it can't time out on a large library, and if you click **Cancel**, it pauses exactly where it was — click Generate again any time to pick up from that point.
+* **Generate** converts them in the background — it keeps running even if you close the browser tab, so a large library doesn't need to be babysat. Come back any time and the page picks up exactly where things stand: still running, paused, or finished, no need to click Generate again to see it. If you're elsewhere in wp-admin when it finishes, a notice and a Tools-menu badge let you know. It's resumable: batches are small and bounded so it can't time out on a large library, and if you click **Cancel**, it pauses exactly where it was — click Generate again any time to pick up from that point.
 
 = Serving the files =
 
@@ -60,6 +60,10 @@ Nothing — uninstalling only removes the plugin's own settings. Your generated 
 
 The plugin checks whether Imagick or GD on your server was actually compiled with WebP support, and tells you plainly on the settings page if neither was — most hosts have at least one. Scan/Generate are disabled until that's resolved, rather than letting you run a tool that can't do anything.
 
+= What happens if I close the tab while Generate is running? =
+
+It keeps going. Generate runs as a background job via WordPress's own WP-Cron, not something tied to your browser tab staying open — come back to Tools → WebP Generator any time and it'll show you exactly where things stand (still running, paused, or finished). On most hosts this fires within moments of clicking Generate; on a host with `DISABLE_WP_CRON` set (common on some managed WordPress hosts, which instead expect a real system cron job hitting `wp-cron.php` on a schedule), it'll still complete, just at whatever pace that schedule visits the site rather than immediately.
+
 = Which page cache plugins are supported? =
 
 Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. Sites without a supported cache plugin work fine too — there's just nothing to auto-clear.
@@ -72,10 +76,25 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 
 == Changelog ==
 
+= 1.10.0 =
+* Generate now runs as a background job (WordPress's own WP-Cron) instead of only while its browser tab stays open -- a large library keeps converting even if you close the tab or navigate away.
+* The Tools → WebP Generator page reflects whatever's actually happening when you load it: still running (with live progress resuming automatically), paused, or finished -- no need to re-click Generate to see where things stand.
+* If a background run finishes while you're elsewhere in wp-admin, a dismissible notice and a count badge on the Tools menu let you know, without needing to keep the tool page open to find out.
+
+= 1.9.1 =
+* Generate's progress bar now tracks images processed against the count Scan found, instead of folders walked -- on a large library most folders already have nothing left to do, so the old folder-based bar could climb steadily while the "images generated" count stayed at 0, looking stalled even while it worked correctly.
+* Failed conversions now record why (the underlying Imagick/GD error) and list them in an expandable "Failed conversions" panel, instead of only a bare count with no way to diagnose it.
+
 = 1.9.0 =
 * Initial release.
 
 == Upgrade Notice ==
+
+= 1.10.0 =
+Generate now runs in the background via WP-Cron and survives closing the tab; the tool page reflects live/paused/finished state on load, and finishing elsewhere in wp-admin shows a notice + menu badge.
+
+= 1.9.1 =
+Generate's progress now tracks images instead of folders, and failed conversions show a reason.
 
 = 1.9.0 =
 Initial release.

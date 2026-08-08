@@ -147,4 +147,32 @@ class AdminBatchingTest extends TestCase {
 		$this->assertSame( 1, $result['stats']['scanned'] );
 		$this->assertSame( 1, $result['stats']['missing'] );
 	}
+
+	/**
+	 * run_job_batch() is the public wrapper WWG_Job::run_tick() calls
+	 * each cron tick -- unlike process_batch() above, it's public, so no
+	 * Reflection is needed to reach it directly.
+	 */
+	public function test_run_job_batch_composes_get_scan_directories_and_process_batch() {
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'untrailingslashit' )->alias(
+			function ( $string ) {
+				return rtrim( $string, '/' );
+			}
+		);
+
+		$admin = new \WWG_Admin( new \WWG_Generator() );
+
+		$result = $admin->run_job_batch( 0, 0, 'scan' );
+
+		// The fixture tree (see set_up()) has the uploads root itself
+		// plus 2024, 2024/01, 2024/02 -- get_scan_directories() walking
+		// it for real is what total_dirs here is actually proving.
+		$this->assertArrayHasKey( 'total_dirs', $result );
+		$this->assertGreaterThanOrEqual( 4, $result['total_dirs'] );
+		$this->assertArrayHasKey( 'stats', $result );
+		$this->assertArrayHasKey( 'done', $result );
+		$this->assertFalse( $result['done'] );
+	}
 }
