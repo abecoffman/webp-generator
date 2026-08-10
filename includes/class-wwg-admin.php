@@ -331,11 +331,29 @@ class WWG_Admin {
 			'generateDone'                 => __( 'Done -- generated %d image(s).', 'webp-generator' ),
 			/* translators: %d: number of images that failed to convert. Deliberately doesn't say "below"/"above" -- this string is reused in more than one place on the page relative to the "Failed conversions" panel it points at, so a directional reference goes stale wherever it ends up on the wrong side. */
 			'failedSummary'                => __( '%d failed -- see "Failed conversions" for details.', 'webp-generator' ),
+			// "...so these take effect right away" is accurate here
+			// specifically because this string's only other use (the
+			// completion notice/Heartbeat update) is always seen fresh --
+			// it's shown once, right after the run, then dismissed/marked
+			// seen. Do NOT reuse this on the tool page's own persisted
+			// summary (see 'cacheClearedPast' below for that) -- that
+			// state survives indefinitely across reloads, where "right
+			// away" would misleadingly imply the run just happened.
 			'cacheCleared'                 => __( 'Also cleared the page cache so these take effect right away.', 'webp-generator' ),
-			// What the tool page's own log line says on completion --
-			// short, since the summary line right above it already
-			// carries the actual count+failed tally (see 'generateDone'
-			// above for why this doesn't repeat it).
+			// Same underlying fact as 'cacheCleared' above, worded so it
+			// reads correctly no matter how long ago the run actually
+			// finished -- used in renderDoneUI()'s summary line, which
+			// (unlike the notice) is exactly the "possibly reading this
+			// days later" context 'cacheCleared' isn't safe for.
+			'cacheClearedPast'             => __( 'The page cache was also cleared as part of that run.', 'webp-generator' ),
+			/* translators: %s: date and time the run finished, e.g. "Aug 10, 2026, 5:46 PM" -- formatted client-side in the visitor's own locale/timezone. */
+			'lastRunPrefix'                => __( 'Last run (%s):', 'webp-generator' ),
+			// What the tool page's own log line says on completion -- just
+			// the terminal status fact ("done" stays true no matter how
+			// long ago it happened, unlike the timestamped summary line
+			// right above it, which needed 'lastRunPrefix' specifically
+			// because *its* wording describes a point-in-time event, not
+			// an ongoing fact).
 			'doneLabel'                    => __( 'Done.', 'webp-generator' ),
 			'paused'                       => __( 'Paused. Click "Generate" to pick up where this left off.', 'webp-generator' ),
 			'vsOriginal'                   => __( 'vs.', 'webp-generator' ),

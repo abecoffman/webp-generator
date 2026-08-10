@@ -100,6 +100,16 @@
 		return ( bytes / Math.pow( 1024, i ) ).toFixed( i === 0 ? 0 : 1 ) + ' ' + units[ i ];
 	}
 
+	// An absolute date/time (not "3 days ago") -- deliberately: the whole
+	// point of using this is to make unambiguous whether a completed run
+	// being displayed happened moments ago or weeks ago, and an absolute
+	// timestamp answers that at a glance without needing a live-updating
+	// "N minutes ago" label or a pile of new relative-time translated
+	// strings just for this one spot.
+	function formatDateTime( unixSeconds ) {
+		return new Date( unixSeconds * 1000 ).toLocaleString( undefined, { dateStyle: 'medium', timeStyle: 'short' } );
+	}
+
 	function requestBatch( dirIndex, fileOffset ) {
 		var body = new FormData();
 		body.append( 'action', wwgAdmin.action );
@@ -460,17 +470,31 @@
 		els.generateBtn.disabled = true;
 		els.cancelBtn.disabled = true;
 		els.progress.hidden = false;
-		renderJobState(); // sets els.summary to the final "N generated. M failed…" tally already.
+		renderJobState(); // sets els.summary to the "N generated. M failed…" tally already.
 
-		// Deliberately short -- the summary line renderJobState() just
-		// set already states the count+failed tally right above the
-		// stats grid; repeating it here would read as the same sentence
-		// twice in a row. This line's only job is the explicit "done"
-		// signal (distinct from the "still finishing the folder scan"
-		// state, which shows the same summary phrasing while running)
-		// plus the cache-cleared note, if there is one.
-		els.log.textContent = wwgAdmin.strings.doneLabel
-			+ ( jobState.cache_cleared ? ' ' + wwgAdmin.strings.cacheCleared : '' );
+		// renderDoneUI() is the only place status is truly, finally
+		// 'done' -- renderJobState() alone can't tell that apart from
+		// "still running, but finished the real work and just walking the
+		// rest of the folder tree" or "paused after finishing the real
+		// work," neither of which is actually over yet. This can be
+		// reached both right as a job finishes live *and* on a plain page
+		// load days or weeks later (the state is persisted server-side) --
+		// prefixing/suffixing with an explicit timestamp here, rather than
+		// baking "just happened"-sounding language into the tally itself,
+		// is what makes it read correctly in both cases: "Last run (Aug
+		// 10, 2026, 5:46 PM): 3 generated. 1 failed…" is accurate whether
+		// that's ten seconds old or three weeks old.
+		if ( jobState.finished_at ) {
+			els.summary.textContent = wwgAdmin.strings.lastRunPrefix.replace( '%s', formatDateTime( jobState.finished_at ) )
+				+ ' ' + els.summary.textContent
+				+ ( jobState.cache_cleared ? ' ' + wwgAdmin.strings.cacheClearedPast : '' );
+		}
+
+		// Deliberately short and un-timestamped, unlike the summary above
+		// -- "done" is a fact about the job's current status, still true
+		// no matter how long ago it became true, not a point-in-time
+		// event that needs dating.
+		els.log.textContent = wwgAdmin.strings.doneLabel;
 	}
 
 	function requestCancel() {
