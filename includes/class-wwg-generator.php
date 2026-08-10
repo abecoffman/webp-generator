@@ -155,11 +155,17 @@ class WWG_Generator {
 	 * @param string $source_path Absolute path to a .jpg/.jpeg/.png file.
 	 * @return array {
 	 *     @type string $status     One of 'created', 'exists', 'failed',
-	 *                              'missing_source', 'unsupported',
-	 *                              'unsupported_backend'.
+	 *                              'missing_source', 'empty_source',
+	 *                              'unsupported', 'unsupported_backend'.
 	 *     @type int    $webp_bytes Size of the resulting .webp file.
 	 *                              Only present when status is 'created' or
 	 *                              'exists'.
+	 *     @type bool   $recovered  True if status is 'created' but the
+	 *                              source file itself was still malformed --
+	 *                              the .webp was produced from image data
+	 *                              recovered from partway through the file
+	 *                              (see attempt_recovery()). Only present
+	 *                              when true.
 	 *     @type string $error      Human-readable reason. Present for
 	 *                              every status except 'created'/'exists'.
 	 * }
@@ -188,6 +194,14 @@ class WWG_Generator {
 			);
 		}
 
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish/become unreadable between file_exists() above and here.
+		if ( 0 === (int) @filesize( $source_path ) ) {
+			return array(
+				'status' => 'empty_source',
+				'error'  => __( 'The source file is 0 bytes (likely an interrupted upload or thumbnail generation). If this image size is still needed, regenerating thumbnails (e.g. via a plugin like Regenerate Thumbnails) or re-uploading the original may restore it.', 'webp-generator' ),
+			);
+		}
+
 		if ( ! $this->has_webp_support() ) {
 			return array(
 				'status' => 'unsupported_backend',
@@ -204,11 +218,26 @@ class WWG_Generator {
 		$created = $this->convert_with_imagick( $source_path, $webp_path )
 			|| $this->convert_with_gd( $source_path, $webp_path );
 
+		// Both attempts above assume the file itself starts with a valid
+		// image header. If it doesn't, see whether a complete image is
+		// embedded somewhere further into the file (e.g. leftover HTTP
+		// headers or other garbage prepended ahead of otherwise-valid
+		// image bytes) before giving up.
+		$recovered = false;
+		if ( ! $created ) {
+			$recovered = $this->attempt_recovery( $source_path, $webp_path );
+			$created   = $recovered;
+		}
+
 		if ( $created && file_exists( $webp_path ) ) {
-			return array(
+			$result = array(
 				'status'     => 'created',
 				'webp_bytes' => (int) filesize( $webp_path ),
 			);
+			if ( $recovered ) {
+				$result['recovered'] = true;
+			}
+			return $result;
 		}
 
 		return array(
@@ -294,6 +323,81 @@ class WWG_Generator {
 		}
 
 		return (bool) $result;
+	}
+
+	/**
+	 * Last resort, called only once both normal attempts above have
+	 * already failed. Some corrupt files (a real one seen in production:
+	 * a partial download that still has a defunct third-party service's
+	 * raw HTTP response headers prepended ahead of an otherwise-complete
+	 * JPEG) contain a fully valid image starting partway through the
+	 * file rather than at byte 0. This searches for that and, if found,
+	 * retries conversion using only the bytes from that point onward --
+	 * written to a throwaway temp file (matching the original's
+	 * extension, so convert_with_gd()'s wp_check_filetype() dispatch
+	 * still works unchanged) so both convert_with_imagick() and
+	 * convert_with_gd() above can be reused exactly as-is rather than
+	 * duplicating their CMYK-handling/quality/type-dispatch logic against
+	 * an in-memory blob. Never modifies $source_path itself.
+	 *
+	 * @param string $source_path Original (still-broken) source file.
+	 * @param string $webp_path   Destination .webp path.
+	 * @return bool Success.
+	 */
+	private function attempt_recovery( $source_path, $webp_path ) {
+		/**
+		 * Whether to attempt recovering a usable image from a corrupt
+		 * source file by searching for an embedded JPEG/PNG signature
+		 * further into the file. Return false to disable.
+		 *
+		 * @param bool   $attempt     Whether to attempt recovery. Default true.
+		 * @param string $source_path Absolute path to the source file.
+		 */
+		if ( ! apply_filters( 'wwg_attempt_recovery', true, $source_path ) ) {
+			return false;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents, WordPress.PHP.NoSilencedErrors.Discouraged -- reading raw local bytes for a byte-signature search, not a remote URL (WP_Filesystem is unused throughout this class already -- filesize()/file_exists() etc. are plain PHP calls elsewhere here too); the file can also legitimately vanish/shrink between the earlier checks in ensure_webp() and here.
+		$bytes = @file_get_contents( $source_path );
+		if ( ! $bytes ) {
+			return false;
+		}
+
+		$type = wp_check_filetype( $source_path );
+		if ( 'image/jpeg' === $type['type'] ) {
+			$needle = "\xFF\xD8\xFF";
+		} elseif ( 'image/png' === $type['type'] ) {
+			$needle = "\x89PNG\x0D\x0A\x1A\x0A";
+		} else {
+			return false;
+		}
+
+		// Start searching at offset 1, not 0 -- an offset-0 match is
+		// exactly what the normal attempt above already tried and failed on.
+		$offset = strpos( $bytes, $needle, 1 );
+		if ( false === $offset ) {
+			return false;
+		}
+
+		$ext      = strtolower( pathinfo( $source_path, PATHINFO_EXTENSION ) );
+		$tmp_path = trailingslashit( get_temp_dir() ) . 'wwg-recovery-' . wp_generate_password( 12, false ) . '.' . $ext;
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- a throwaway local temp file, not site content; see the file_get_contents() note above for why this class doesn't route through WP_Filesystem.
+		if ( false === file_put_contents( $tmp_path, substr( $bytes, $offset ) ) ) {
+			return false;
+		}
+
+		$recovered_ok = $this->convert_with_imagick( $tmp_path, $webp_path )
+			|| $this->convert_with_gd( $tmp_path, $webp_path );
+
+		if ( ! $recovered_ok ) {
+			/* translators: 1: byte offset an embedded image signature was found at, 2: the decode error for that recovered data. */
+			$this->last_error = sprintf( __( 'Found what looks like an embedded image at byte offset %1$d, but converting it also failed: %2$s', 'webp-generator' ), $offset, $this->last_error );
+		}
+
+		wp_delete_file( $tmp_path );
+
+		return $recovered_ok;
 	}
 
 	/**

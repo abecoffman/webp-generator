@@ -250,3 +250,41 @@ details summary {
 .wwg-failures-list li + li {
 	border-top: 1px solid #dcdcde;
 }
+
+.wwg-recoveries {
+	margin: 4px 0 0;
+}
+
+.wwg-recoveries summary {
+	font-size: 13px;
+	font-weight: 600;
+	color: #646970;
+	margin-top: 0;
+}
+
+.wwg-recoveries-note {
+	font-size: 12px;
+	color: #646970;
+	margin: 8px 0 0;
+}
+
+.wwg-recoveries-list {
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 4px 12px;
+	background: #f6f7f7;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	max-height: 200px;
+	overflow-y: auto;
+	font-size: 12px;
+	color: #50575e;
+}
+
+.wwg-recoveries-list li {
+	padding: 6px 0;
+}
+
+.wwg-recoveries-list li + li {
+	border-top: 1px solid #dcdcde;
+}

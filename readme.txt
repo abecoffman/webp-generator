@@ -4,7 +4,7 @@ Tags: webp, image optimization, performance, media, images
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.10.0
+Stable tag: 1.12.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -31,7 +31,7 @@ If your site runs Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, or L
 
 * Configurable WebP quality (1-100, default 75).
 * Works with any uploads folder layout, not just WordPress's default year/month structure.
-* A handful of filters for developers: `wwg_scan_directories`, `wwg_clear_cache_for_attachment`, `wwg_clear_all_cache`.
+* A handful of filters for developers: `wwg_scan_directories`, `wwg_clear_cache_for_attachment`, `wwg_clear_all_cache`, `wwg_attempt_recovery`.
 
 == Installation ==
 
@@ -62,7 +62,7 @@ The plugin checks whether Imagick or GD on your server was actually compiled wit
 
 = What happens if I close the tab while Generate is running? =
 
-It keeps going. Generate runs as a background job via WordPress's own WP-Cron, not something tied to your browser tab staying open — come back to Tools → WebP Generator any time and it'll show you exactly where things stand (still running, paused, or finished). On most hosts this fires within moments of clicking Generate; on a host with `DISABLE_WP_CRON` set (common on some managed WordPress hosts, which instead expect a real system cron job hitting `wp-cron.php` on a schedule), it'll still complete, just at whatever pace that schedule visits the site rather than immediately.
+It keeps going. While Tools → WebP Generator is open, Generate runs at full speed; close the tab (or navigate away) and it falls back to running as a background job via WordPress's own WP-Cron instead of stopping — come back any time and it'll show you exactly where things stand (still running, paused, or finished). The background pace is deliberately more modest than the full-speed, tab-open pace (WordPress's own cron self-throttles to avoid piling up overlapping requests), so a very large library will finish faster if you leave the tab open, but it will finish either way. On a host with `DISABLE_WP_CRON` set (common on some managed WordPress hosts, which instead expect a real system cron job hitting `wp-cron.php` on a schedule), the background pace depends on how often that schedule visits the site rather than firing itself immediately.
 
 = Which page cache plugins are supported? =
 
@@ -75,6 +75,17 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 3. Settings: configurable WebP quality.
 
 == Changelog ==
+
+= 1.12.0 =
+* A file that fails to convert once and hasn't changed since is no longer re-attempted on every later Scan/Generate run -- it's still reported every time (so it doesn't silently disappear from view), but without repeating the expensive, doomed decode attempt. Once a failure has held steady across a run, the folder it's in can also join the "already verified" cache from 1.11.0 -- a folder isn't kept out of that cache forever just because one file in it will never convert. Automatically re-attempts for real the moment the file actually changes, even for a folder that's already cached this way.
+* A completely empty (0-byte) source file -- typically an interrupted upload or thumbnail generation -- now gets a distinct, actionable message instead of a generic decode-failure error.
+* When a file fails to convert normally, the tool now also checks whether a complete, valid image is embedded further into the file (e.g. behind leftover HTTP headers or other stray bytes prepended ahead of otherwise-intact image data) and, if so, generates the `.webp` from that recovered data. Anything created this way is flagged separately in a new "Recovered from embedded data" panel, since the original file itself is still worth a look. Never modifies the original file. Can be disabled via the new `wwg_attempt_recovery` filter.
+
+= 1.11.0 =
+* Scan and Generate now remember which folders they've already fully verified clean, and skip straight past them on later runs instead of re-checking every file every time -- on a mature library, most folders are old and effectively never change again, so a repeat run can now finish dramatically faster. Self-invalidating: if anything actually changes in a folder (a new upload, a migration, a restore), it's automatically rechecked for real on the next run, no matter how the change happened.
+* Generate now runs at full speed while Tools → WebP Generator stays open, instead of always waiting on WordPress's own cron self-throttle (roughly one batch a minute) even while you're actively watching -- closing the tab is still exactly what falls back to that slower, unattended background pace.
+* Scan no longer gets stuck permanently disabled once a Generate run finishes -- previously, since progress now persists across reloads, there was no way back to a fresh count without clearing server state by hand.
+* Progress text during and after a run is clearer about what's actually still happening: no more "0 images generated so far…" sitting next to a rapidly-changing folder name once every missing image has already been found (it's just finishing the safety-net folder walk at that point, not converting anything new), and the final summary no longer repeats the same sentence twice in a row.
 
 = 1.10.0 =
 * Generate now runs as a background job (WordPress's own WP-Cron) instead of only while its browser tab stays open -- a large library keeps converting even if you close the tab or navigate away.
@@ -89,6 +100,15 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 * Initial release.
 
 == Upgrade Notice ==
+
+= 1.12.0 =
+Files that permanently fail conversion are no longer re-attempted every run, empty files get a clearer message, and the tool now tries to recover a usable image from files with valid data buried after stray bytes.
+
+= 1.11.0 =
+Scan and Generate now skip folders already confirmed clean on a previous run, instead of re-checking everything every time -- repeat runs on a mature library are dramatically faster.
+
+= 1.10.1 =
+Generate now runs at full speed while its tab stays open (falling back to a slower background pace once you close it), Scan no longer gets stuck disabled after a run finishes, and progress text is clearer about what's actually happening.
 
 = 1.10.0 =
 Generate now runs in the background via WP-Cron and survives closing the tab; the tool page reflects live/paused/finished state on load, and finishing elsewhere in wp-admin shows a notice + menu badge.

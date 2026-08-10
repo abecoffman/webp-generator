@@ -64,6 +64,47 @@ class GeneratorIntegrationTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * The one scenario the unit tier's GeneratorRecoveryTest.php explicitly
+	 * defers here: a file with garbage bytes prepended ahead of a
+	 * genuinely valid, complete JPEG should still end up with a real,
+	 * working .webp -- flagged as recovered -- and the original file must
+	 * come out byte-for-byte untouched. The embedded JPEG is synthesized
+	 * with GD itself (imagecreatetruecolor()/imagejpeg()) rather than
+	 * relying on a fixture file, so this needs no network access and stays
+	 * fast/deterministic.
+	 */
+	public function test_ensure_webp_recovers_a_valid_image_embedded_after_garbage_bytes() {
+		ob_start();
+		imagejpeg( imagecreatetruecolor( 2, 2 ) );
+		$real_jpeg_bytes = ob_get_clean();
+
+		$tmp_dir = get_temp_dir() . 'wwg-integration-' . wp_generate_password( 8, false ) . '/';
+		wp_mkdir_p( $tmp_dir );
+		$source        = $tmp_dir . 'source.jpg';
+		$garbage_bytes = 'HTTP/1.1 200 OK' . str_repeat( "\x00garbage\x00", 20 );
+		$original_bytes = $garbage_bytes . $real_jpeg_bytes;
+		file_put_contents( $source, $original_bytes );
+
+		$generator = new WWG_Generator();
+		$result    = $generator->ensure_webp( $source );
+
+		$this->assertSame( 'created', $result['status'] );
+		$this->assertTrue( $result['recovered'] );
+
+		$webp_path = $tmp_dir . 'source.webp';
+		$this->assertFileExists( $webp_path );
+
+		$bytes = file_get_contents( $webp_path, false, null, 0, 12 );
+		$this->assertSame( 'RIFF', substr( $bytes, 0, 4 ) );
+		$this->assertSame( 'WEBP', substr( $bytes, 8, 4 ) );
+
+		// The whole point: the still-malformed original is never touched.
+		$this->assertSame( $original_bytes, file_get_contents( $source ) );
+
+		self::delete_dir_recursive( $tmp_dir );
+	}
+
+	/**
 	 * The real wp_generate_attachment_metadata filter, wired up via
 	 * init() exactly as it runs in production -- a real attachment
 	 * insert should produce a real .webp sibling for the original file

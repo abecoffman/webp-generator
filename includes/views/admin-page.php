@@ -104,6 +104,15 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 				<ul class="wwg-failures-list" id="wwg-failures-list"></ul>
 			</details>
 
+			<details class="wwg-recoveries" id="wwg-recoveries" hidden>
+				<summary>
+					<?php esc_html_e( 'Recovered from embedded data', 'webp-generator' ); ?>
+					(<span id="wwg-recoveries-count">0</span>)
+				</summary>
+				<p class="wwg-recoveries-note"><?php esc_html_e( 'A .webp was created successfully for each file below, but the original itself still has stray bytes before the real image data starts -- worth a look (or re-exporting from the source) if you still have it.', 'webp-generator' ); ?></p>
+				<ul class="wwg-recoveries-list" id="wwg-recoveries-list"></ul>
+			</details>
+
 			<p class="wwg-log" id="wwg-log" aria-live="polite"></p>
 		</div>
 	</div>

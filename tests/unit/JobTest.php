@@ -44,6 +44,66 @@ class WWG_Admin_Fake_Batch extends \WWG_Admin {
 }
 
 /**
+ * A WWG_Admin double whose run_job_batch() call reenters into a given
+ * callback WHILE the outer call is still executing -- and so, since
+ * process_one_batch() holds LOCK_KEY for its entire duration, still
+ * holding that lock. Exploits PHP's single-threadedness to prove the
+ * lock is actually *shared* between the cron and drive paths (a
+ * concurrent call really does find it locked), not just coincidentally
+ * both present in the source.
+ */
+class WWG_Admin_Reentrant_Fake extends \WWG_Admin {
+
+	/**
+	 * @var int
+	 */
+	public $calls = 0;
+
+	/**
+	 * @var callable
+	 */
+	private $reentrant_call;
+
+	/**
+	 * Whatever the reentrant callback returned.
+	 *
+	 * @var mixed
+	 */
+	public $reentrant_result;
+
+	/**
+	 * @param callable $reentrant_call Invoked mid-call, before this
+	 *                                 method returns its own canned batch.
+	 */
+	public function __construct( callable $reentrant_call ) {
+		parent::__construct( new \WWG_Generator() );
+		$this->reentrant_call = $reentrant_call;
+	}
+
+	public function run_job_batch( $dir_index, $file_offset, $mode ) {
+		++$this->calls;
+		$this->reentrant_result = ( $this->reentrant_call )();
+
+		return array(
+			'stats'       => array(
+				'scanned'        => 1,
+				'missing'        => 1,
+				'converted'      => 1,
+				'failed'         => 0,
+				'original_bytes' => 0,
+				'webp_bytes'     => 0,
+				'failures'       => array(),
+				'recoveries'     => array(),
+			),
+			'dir'         => '2024/01',
+			'dir_index'   => 1,
+			'file_offset' => 0,
+			'done'        => false,
+		);
+	}
+}
+
+/**
  * Exercises WWG_Job's orchestration -- the lock, cursor/stats
  * bookkeeping, rescheduling, cancel, and seen-tracking logic -- against
  * a fake in-memory transient store and the scripted WWG_Admin double
@@ -161,6 +221,7 @@ class JobTest extends TestCase {
 					'original_bytes' => 0,
 					'webp_bytes'     => 0,
 					'failures'       => array(),
+					'recoveries'     => array(),
 				),
 				'total_missing' => 5,
 				'current_dir'   => '',
@@ -191,6 +252,7 @@ class JobTest extends TestCase {
 					'original_bytes' => 0,
 					'webp_bytes'     => 0,
 					'failures'       => array(),
+					'recoveries'     => array(),
 				),
 				$stats_overrides
 			),
@@ -349,5 +411,108 @@ class JobTest extends TestCase {
 
 		$hydrated = $job->get_hydrated_state();
 		$this->assertFalse( $hydrated['seen'] );
+	}
+
+	// ---- handle_drive_job() -- the client's fast-path equivalent of
+	// run_tick(), sharing process_one_batch() with it entirely ----
+
+	public function test_handle_drive_job_reports_locked_and_does_no_work_when_lock_is_held() {
+		$this->transients['wwg_job_lock']  = time();
+		$this->transients['wwg_job_state'] = $this->running_state();
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		$job->handle_drive_job();
+
+		$this->assertSame( 'locked', $this->last_json['outcome'] );
+		$this->assertSame( 0, $admin->calls );
+	}
+
+	public function test_handle_drive_job_reports_stopped_when_not_running() {
+		$this->transients['wwg_job_state'] = $this->running_state( array( 'status' => 'paused' ) );
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		$job->handle_drive_job();
+
+		$this->assertSame( 'stopped', $this->last_json['outcome'] );
+		$this->assertSame( 0, $admin->calls );
+		$this->assertArrayNotHasKey( 'wwg_job_lock', $this->transients );
+	}
+
+	public function test_handle_drive_job_advances_then_completes_like_run_tick() {
+		$this->transients['wwg_job_state'] = $this->running_state();
+
+		$admin          = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$admin->batches = array(
+			$this->canned_batch( array( 'converted' => 2 ), false, 1, 0 ),
+			$this->canned_batch( array( 'converted' => 3 ), true, 2, 0 ),
+		);
+		$job = new \WWG_Job( $admin );
+
+		$job->handle_drive_job();
+		$this->assertSame( 'advanced', $this->last_json['outcome'] );
+		$this->assertSame( 2, $this->last_json['state']['stats']['converted'] );
+
+		$job->handle_drive_job();
+		$this->assertSame( 'done', $this->last_json['outcome'] );
+		$this->assertSame( 5, $this->last_json['state']['stats']['converted'] );
+		$this->assertSame( 2, $admin->calls );
+
+		// The cron safety net stays primed even though the client did
+		// the driving -- ensure_scheduled() runs from the 'advanced' call
+		// same as it would from run_tick(); the 'done' call must not
+		// schedule anything further. Exactly one call across both.
+		$this->assertSame( 1, $this->schedule_single_calls );
+	}
+
+	/**
+	 * The real mutex-sharing proof: while WWG_Admin_Reentrant_Fake's
+	 * run_job_batch() is still executing inside the *outer* run_tick()
+	 * call (which is still holding LOCK_KEY), it reenters with a
+	 * handle_drive_job() call standing in for a concurrent AJAX request
+	 * landing mid-batch. That inner call must find the lock held and do
+	 * no work of its own.
+	 */
+	public function test_a_drive_request_reentering_during_a_cron_tick_finds_it_locked() {
+		$this->transients['wwg_job_state'] = $this->running_state();
+
+		$job   = null;
+		$admin = new WWG_Admin_Reentrant_Fake(
+			function () use ( &$job ) {
+				$job->handle_drive_job();
+				return $this->last_json;
+			}
+		);
+		$job = new \WWG_Job( $admin );
+
+		$job->run_tick();
+
+		$this->assertSame( 1, $admin->calls, 'The reentrant handle_drive_job() call must not have run a second batch.' );
+		$this->assertSame( 'locked', $admin->reentrant_result['outcome'] );
+	}
+
+	/**
+	 * Mirror image of the above: a cron tick reentering mid-drive-call
+	 * must equally find it locked.
+	 */
+	public function test_a_cron_tick_reentering_during_a_drive_request_finds_it_locked() {
+		$this->transients['wwg_job_state'] = $this->running_state();
+
+		$job   = null;
+		$admin = new WWG_Admin_Reentrant_Fake(
+			function () use ( &$job ) {
+				$job->run_tick();
+				return null;
+			}
+		);
+		$job = new \WWG_Job( $admin );
+
+		$job->handle_drive_job();
+
+		$this->assertSame( 1, $admin->calls, 'The reentrant run_tick() call must not have run a second batch.' );
+		$this->assertSame( 'advanced', $this->last_json['outcome'] );
 	}
 }

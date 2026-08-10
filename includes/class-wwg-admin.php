@@ -25,20 +25,83 @@ class WWG_Admin {
 	const PAGE_SLUG      = 'webp-generator';
 
 	/**
-	 * How many files to check/convert per batch -- scan's batches run one
-	 * per AJAX request (see handle_ajax()); convert's run one per WWG_Job
-	 * cron tick (see WWG_Job::run_tick()). Scanning is just file_exists()
-	 * calls, so it can move through a lot per batch; converting decodes/
-	 * re-encodes full images, so it stays small enough that a single
-	 * batch can't run into PHP's max_execution_time even on a slow shared
-	 * host.
+	 * How many files list_images_in_dir() results process_batch() looks
+	 * at per call, for both scan and convert -- large, since checking
+	 * whether a file already has a .webp sibling (file_exists()) is
+	 * cheap regardless of mode; only actually converting a missing file
+	 * is expensive (see MAX_CONVERSIONS_PER_BATCH for the cap on that).
+	 * A larger shared window also means a large folder's full directory
+	 * listing (list_images_in_dir() re-lists a folder's entire contents
+	 * on every call regardless of how much of it that call actually
+	 * uses) gets redundantly redone across fewer batches.
 	 *
-	 * @var array<string,int>
+	 * @var int
 	 */
-	const BATCH_SIZE = array(
-		'scan'    => 500,
-		'convert' => 40,
-	);
+	const BATCH_SIZE = 2000;
+
+	/**
+	 * Convert mode stops attempting further real conversions once it's
+	 * done this many within one batch -- files after that point are
+	 * simply deferred to the next batch/tick, not skipped. Decoding/
+	 * re-encoding a full image is the one genuinely expensive per-file
+	 * cost in this class, so this (not BATCH_SIZE) is what keeps a
+	 * single request safely inside PHP's max_execution_time even on a
+	 * slow shared host converting a folder that turns out to need a lot
+	 * of real work.
+	 *
+	 * @var int
+	 */
+	const MAX_CONVERSIONS_PER_BATCH = 40;
+
+	/**
+	 * Option holding a dir_rel => value map of folders already confirmed
+	 * to have nothing further to do, as of that value's mtime. The value
+	 * is either a bare mtime int (the common case: zero images missing a
+	 * .webp sibling), or -- see OPTION_KNOWN_FAILURES -- an
+	 * {mtime, known_failures} array when the only missing images are
+	 * known, already-confirmed-stable failures. Shared between scan and
+	 * convert -- "this folder has nothing [further] missing" is the same
+	 * fact regardless of which mode discovered it. Either mode can now
+	 * single-batch-verify (and so cache) a folder of any size on its own,
+	 * as long as it doesn't need more than MAX_CONVERSIONS_PER_BATCH real
+	 * conversions in that one pass -- an already-clean folder is equally
+	 * cheap to verify in either mode. A plain option (not a transient)
+	 * since this is a durable learned fact, not a short-lived cache -- it
+	 * self-invalidates via filemtime() (see is_known_clean()) rather than
+	 * an arbitrary TTL. autoload=false: only read during an actual Scan/
+	 * Generate run, never on a normal admin page load.
+	 *
+	 * @var string
+	 */
+	const OPTION_CLEAN_DIRS = 'wwg_clean_dirs';
+
+	/**
+	 * Option holding a file_rel => {size, mtime, error} map of individual
+	 * files known to permanently fail conversion (e.g. a 0-byte file, or
+	 * one with corrupt image data) -- convert mode consults this to skip
+	 * straight to reporting the remembered failure instead of re-running
+	 * an expensive, doomed Imagick/GD decode attempt every single run.
+	 * Self-invalidates the same way OPTION_CLEAN_DIRS does: if the file's
+	 * size/mtime ever change, it's stale and gets a real re-attempt (see
+	 * is_known_failure()).
+	 *
+	 * A folder isn't excluded from OPTION_CLEAN_DIRS just because it
+	 * contains a known failure -- once a failure has been reconfirmed
+	 * stable (survived at least one full pass via the shortcut above, not
+	 * just failed once), OPTION_CLEAN_DIRS can cache the whole folder
+	 * "clean except these known failures". That cache entry still
+	 * carries the specific known-failure file_rels it depends on, so
+	 * is_known_clean() can cheaply re-validate each of them (a stat, not
+	 * a decode) before trusting the folder-level skip -- the directory's
+	 * own mtime alone isn't enough, since an in-place edit to one of
+	 * those files typically doesn't touch it. See is_known_clean() and
+	 * process_batch()'s $became_clean for the full mechanics.
+	 *
+	 * autoload=false, same reasoning as OPTION_CLEAN_DIRS.
+	 *
+	 * @var string
+	 */
+	const OPTION_KNOWN_FAILURES = 'wwg_known_failures';
 
 	/**
 	 * @var WWG_Generator
@@ -197,6 +260,7 @@ class WWG_Admin {
 					'start'  => WWG_Job::ACTION_START,
 					'status' => WWG_Job::ACTION_STATUS,
 					'cancel' => WWG_Job::ACTION_CANCEL,
+					'drive'  => WWG_Job::ACTION_DRIVE,
 				),
 				'strings'    => self::get_strings(),
 			)
@@ -219,21 +283,39 @@ class WWG_Admin {
 			'checking'        => __( 'Checking %s…', 'webp-generator' ),
 			/* translators: %s: folder path currently being processed, e.g. "2024/03". Substituted client-side in admin.js. */
 			'converting'      => __( 'Generating %s…', 'webp-generator' ),
+			/* translators: %s: folder path currently being walked, e.g. "2024/03". Substituted client-side in admin.js. Shown once every missing image Scan found has already been processed -- the run keeps walking the rest of the library to catch anything Scan might have missed, but isn't converting anything new, so this deliberately doesn't say "Generating" like the string above. */
+			'stillScanning'   => __( 'All missing images found -- finishing folder scan (%s)…', 'webp-generator' ),
 			'uploadsRoot'     => __( 'the uploads folder', 'webp-generator' ),
 			/* translators: %d: number of images scanned so far. */
 			'scannedSoFar'    => __( '%d images scanned so far…', 'webp-generator' ),
 			/* translators: %d: number of images generated so far. */
 			'generatedSoFar'  => __( '%d images generated so far…', 'webp-generator' ),
+			/* translators: %d: number of images generated. Shown once every missing image Scan found has been processed -- unlike 'generatedSoFar' above, this is the final count for this run (only the "finishing folder scan" walk is left, which won't change it further), so it deliberately doesn't say "so far". */
+			'generatedFinal'  => __( '%d image(s) generated.', 'webp-generator' ),
 			'missingNone'     => __( 'Every image already has a .webp version. Nothing to generate.', 'webp-generator' ),
 			/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB". */
 			'missingPlural'   => __( '%1$d images are missing a .webp version (%2$s).', 'webp-generator' ),
 			/* translators: 1: combined file size, e.g. "420 KB". */
 			'missingSingular' => __( '1 image is missing a .webp version (%2$s).', 'webp-generator' ),
+			// Full "Done -- generated N, M failed" phrasing for contexts
+			// with no other supporting UI around them -- the completion
+			// notice (WWG_Job::maybe_render_notice()) and the Heartbeat
+			// live-update (admin-heartbeat.js). The tool page itself
+			// does NOT use this for its log line -- renderJobState()'s
+			// summary line already states the same count+failed tally
+			// right above the stats grid, so repeating it in the log
+			// line too would just be the same sentence twice in a row;
+			// see 'doneLabel' below for what the tool page uses instead.
 			/* translators: %d: number of images. */
 			'generateDone'    => __( 'Done -- generated %d image(s).', 'webp-generator' ),
-			/* translators: %d: number of images that failed to convert. */
-			'failedSummary'   => __( '%d failed -- see the list below.', 'webp-generator' ),
+			/* translators: %d: number of images that failed to convert. Deliberately doesn't say "below"/"above" -- this string is reused in more than one place on the page relative to the "Failed conversions" panel it points at, so a directional reference goes stale wherever it ends up on the wrong side. */
+			'failedSummary'   => __( '%d failed -- see "Failed conversions" for details.', 'webp-generator' ),
 			'cacheCleared'    => __( 'Also cleared the page cache so these take effect right away.', 'webp-generator' ),
+			// What the tool page's own log line says on completion --
+			// short, since the summary line right above it already
+			// carries the actual count+failed tally (see 'generateDone'
+			// above for why this doesn't repeat it).
+			'doneLabel'       => __( 'Done.', 'webp-generator' ),
 			'paused'          => __( 'Paused. Click "Generate" to pick up where this left off.', 'webp-generator' ),
 			'vsOriginal'      => __( 'vs.', 'webp-generator' ),
 			'folders'         => __( 'folders', 'webp-generator' ),
@@ -417,6 +499,175 @@ class WWG_Admin {
 	}
 
 	/**
+	 * Whether $dir_rel was already confirmed to have nothing further to
+	 * do -- either zero images missing a .webp sibling, or the only ones
+	 * that are missing are known, still-stable failures (see
+	 * is_known_failure()) -- and nothing invalidating has happened since.
+	 * Cheap in the common "never cached" case -- a single get_option()
+	 * array lookup, no filesystem stat at all.
+	 *
+	 * @param string $dir_rel Relative folder path -- key into the cache.
+	 * @param string $abs_dir Absolute folder path, stat'd only if there's
+	 *                        a cache entry to validate.
+	 * @return array|false False if not cached, or since invalidated.
+	 *                      Otherwise the (possibly empty) list of
+	 *                      known-failure file_rels this folder's clean
+	 *                      status depends on -- the caller still needs to
+	 *                      report those every run, just without re-
+	 *                      walking the rest of the folder to find them.
+	 */
+	private function is_known_clean( $dir_rel, $abs_dir ) {
+		$clean_dirs = get_option( self::OPTION_CLEAN_DIRS, array() );
+
+		if ( ! isset( $clean_dirs[ $dir_rel ] ) ) {
+			return false;
+		}
+
+		// The folder may have vanished entirely since being cached --
+		// treat that like "not cached" (a plain recheck finds it empty
+		// and moves on), not a filemtime() warning on a gone path.
+		if ( ! is_dir( $abs_dir ) ) {
+			return false;
+		}
+
+		$entry = $clean_dirs[ $dir_rel ];
+		// Entries from before known-failures could be cached alongside a
+		// folder are a bare mtime int (there was never anything else to
+		// store) -- tolerate reading that shape indefinitely rather than
+		// forcing a one-time migration.
+		$mtime          = is_array( $entry ) ? $entry['mtime'] : $entry;
+		$known_failures = is_array( $entry ) && ! empty( $entry['known_failures'] ) ? $entry['known_failures'] : array();
+
+		if ( filemtime( $abs_dir ) !== $mtime ) {
+			return false;
+		}
+
+		// The directory's own mtime only catches files being added,
+		// removed, or renamed -- an in-place edit to one of the known-
+		// failure files this folder's clean status depends on typically
+		// won't touch it. Cheaply (one stat per known failure, not a walk
+		// of the whole folder) re-validate each one before trusting the
+		// skip below, so a since-fixed file can never be masked forever
+		// just because the rest of the folder never changed.
+		foreach ( $known_failures as $file_rel ) {
+			if ( false === $this->is_known_failure( $file_rel, $abs_dir . '/' . basename( $file_rel ) ) ) {
+				return false;
+			}
+		}
+
+		return $known_failures;
+	}
+
+	/**
+	 * Record $dir_rel as clean (optionally "clean except these known,
+	 * already-confirmed-stable failures") as of its current mtime. Call
+	 * only after a single process_batch() call has just verified every
+	 * file in the folder in one pass -- see process_batch()'s
+	 * $became_clean check.
+	 *
+	 * @param string   $dir_rel             Relative folder path.
+	 * @param string   $abs_dir             Absolute folder path.
+	 * @param string[] $known_failure_rels  file_rels of known failures
+	 *                                      (already reconfirmed stable
+	 *                                      this same pass, not freshly
+	 *                                      discovered) this folder's
+	 *                                      clean status depends on.
+	 */
+	private function mark_known_clean( $dir_rel, $abs_dir, array $known_failure_rels = array() ) {
+		if ( ! is_dir( $abs_dir ) ) {
+			// Vanished between the file listing and here (rare race) --
+			// nothing meaningful to fingerprint.
+			return;
+		}
+
+		$mtime = filemtime( $abs_dir );
+		if ( false === $mtime ) {
+			return;
+		}
+
+		$clean_dirs = get_option( self::OPTION_CLEAN_DIRS, array() );
+		// Keep storing the plain mtime int for the common (zero known
+		// failures) case -- smaller, and identical to every entry written
+		// before this feature existed; only step up to the richer shape
+		// when there's actually something extra to remember.
+		$clean_dirs[ $dir_rel ] = $known_failure_rels
+			? array(
+				'mtime'          => $mtime,
+				'known_failures' => array_values( $known_failure_rels ),
+			)
+			: $mtime;
+		update_option( self::OPTION_CLEAN_DIRS, $clean_dirs, false );
+	}
+
+	/**
+	 * Whether $file_rel was already confirmed to fail conversion, and its
+	 * size/mtime haven't changed since -- mirrors is_known_clean()'s
+	 * self-invalidation approach at file granularity instead of folder.
+	 *
+	 * @param string $file_rel    Relative path -- key into the cache.
+	 * @param string $source_path Absolute path, stat'd only if there's a
+	 *                            cache entry to validate.
+	 * @return array|false The remembered {size, mtime, error} entry if the
+	 *                      fingerprint still matches, false otherwise.
+	 */
+	private function is_known_failure( $file_rel, $source_path ) {
+		$known = get_option( self::OPTION_KNOWN_FAILURES, array() );
+
+		if ( ! isset( $known[ $file_rel ] ) || ! file_exists( $source_path ) ) {
+			return false;
+		}
+
+		$entry = $known[ $file_rel ];
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish/become unreadable between the directory listing and here; (int) cast already turns a false return into a harmless 0, which simply won't match a real stored fingerprint.
+		if ( (int) @filesize( $source_path ) !== $entry['size'] || (int) @filemtime( $source_path ) !== $entry['mtime'] ) {
+			return false; // Fingerprint changed -- something touched the file, so re-attempt for real.
+		}
+
+		return $entry;
+	}
+
+	/**
+	 * Record $file_rel as failing, fingerprinted to its current size/mtime
+	 * so a later real change to the file is detected and re-attempted.
+	 *
+	 * @param string $file_rel    Relative path.
+	 * @param string $source_path Absolute path.
+	 * @param string $error       The failure reason to remember and
+	 *                            re-report on future skipped attempts.
+	 */
+	private function remember_failure( $file_rel, $source_path, $error ) {
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see is_known_failure() above.
+		$mtime = (int) @filemtime( $source_path );
+		if ( ! $mtime ) {
+			return; // Vanished/unreadable -- nothing meaningful to fingerprint.
+		}
+
+		$known              = get_option( self::OPTION_KNOWN_FAILURES, array() );
+		$known[ $file_rel ] = array(
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see is_known_failure() above.
+			'size'  => (int) @filesize( $source_path ),
+			'mtime' => $mtime,
+			'error' => $error,
+		);
+		update_option( self::OPTION_KNOWN_FAILURES, $known, false );
+	}
+
+	/**
+	 * Stop remembering $file_rel as a failure -- called once it's known to
+	 * no longer be one (a fresh success, including a recovered one, or a
+	 * .webp appearing for it through some other means).
+	 *
+	 * @param string $file_rel Relative path.
+	 */
+	private function forget_failure( $file_rel ) {
+		$known = get_option( self::OPTION_KNOWN_FAILURES, array() );
+		if ( isset( $known[ $file_rel ] ) ) {
+			unset( $known[ $file_rel ] );
+			update_option( self::OPTION_KNOWN_FAILURES, $known, false );
+		}
+	}
+
+	/**
 	 * Process one bounded slice of files starting at ($dir_index,
 	 * $file_offset), advancing into the next folder once the current one
 	 * is exhausted.
@@ -436,6 +687,7 @@ class WWG_Admin {
 			'original_bytes' => 0,
 			'webp_bytes'     => 0,
 			'failures'       => array(),
+			'recoveries'     => array(),
 		);
 
 		if ( $dir_index >= count( $dirs ) ) {
@@ -445,6 +697,7 @@ class WWG_Admin {
 				'dir_index'   => $dir_index,
 				'file_offset' => 0,
 				'done'        => true,
+				'skipped'     => false,
 			);
 		}
 
@@ -454,17 +707,105 @@ class WWG_Admin {
 			? $upload_dir['basedir']
 			: trailingslashit( $upload_dir['basedir'] ) . $dir_rel;
 
+		$cached_known_failures = $this->is_known_clean( $dir_rel, $abs_dir );
+		if ( false !== $cached_known_failures ) {
+			// The folder itself isn't walked -- that's the whole point --
+			// but any known failures it depends on must still be reported
+			// every run, same as if we'd found them the slow way (see
+			// is_known_failure()'s docblock: nothing should silently drop
+			// out of view). is_known_clean() already cheaply re-validated
+			// each of these still matches its remembered fingerprint.
+			foreach ( $cached_known_failures as $file_rel ) {
+				$entry = $this->is_known_failure( $file_rel, $abs_dir . '/' . basename( $file_rel ) );
+				if ( false === $entry ) {
+					continue; // Shouldn't happen -- is_known_clean() just checked this -- but never trust a stat() race blindly.
+				}
+				++$stats['missing'];
+				$stats['original_bytes'] += $entry['size'];
+				if ( 'convert' === $mode ) {
+					++$stats['failed'];
+					$stats['failures'][] = array(
+						'file'  => $file_rel,
+						'error' => $entry['error'],
+					);
+				}
+			}
+
+			return array(
+				'stats'       => $stats,
+				'dir'         => $dir_rel,
+				'dir_index'   => $dir_index + 1,
+				'file_offset' => 0,
+				'done'        => false,
+				'skipped'     => true,
+			);
+		}
+
 		$files = $this->list_images_in_dir( $abs_dir );
-		$slice = array_slice( $files, $file_offset, self::BATCH_SIZE[ $mode ] );
+		$slice = array_slice( $files, $file_offset, self::BATCH_SIZE );
+
+		// Counts real (expensive) ensure_webp() calls this batch only --
+		// deliberately separate from $stats['missing'], since a
+		// known-failure shortcut hit below reports as missing/failed too
+		// but does no real decode work, so it must not eat into the cap
+		// that exists specifically to bound that expensive work.
+		$real_attempts = 0;
+
+		// file_rels of known failures reconfirmed via the shortcut below
+		// this same pass -- as opposed to ones failing for the first time
+		// this pass, which $became_clean below must not yet trust.
+		$stable_known_failures = array();
 
 		foreach ( $slice as $filename ) {
-			++$stats['scanned'];
 			$source_path = $abs_dir . '/' . $filename;
+			$file_rel    = '' === $dir_rel ? $filename : $dir_rel . '/' . $filename;
 
 			if ( 'convert' === $mode ) {
+				$webp_path = preg_replace( '/\.(jpe?g|png)$/i', '.webp', $source_path );
+
+				// Belt-and-suspenders: a .webp may have appeared some
+				// other way (manual upload, another tool) since a failure
+				// was last remembered for this file -- checked before the
+				// known-failure shortcut so a stale record can never mask
+				// a file that's already actually fine.
+				if ( file_exists( $webp_path ) ) {
+					++$stats['scanned'];
+					$this->forget_failure( $file_rel );
+					continue;
+				}
+
+				$known_failure = $this->is_known_failure( $file_rel, $source_path );
+				if ( false !== $known_failure ) {
+					++$stats['scanned'];
+					++$stats['missing'];
+					++$stats['failed'];
+					$stats['original_bytes'] += $known_failure['size'];
+					$stats['failures'][]      = array(
+						'file'  => $file_rel,
+						'error' => $known_failure['error'],
+					);
+					$stable_known_failures[]  = $file_rel;
+					continue; // No real decode attempt -- doesn't touch $real_attempts/the cap below.
+				}
+
+				// Only the real-conversion path is expensive -- once this
+				// batch has attempted MAX_CONVERSIONS_PER_BATCH of them,
+				// stop and leave the rest of the slice for the next call
+				// (not counted as scanned, so resumption starts exactly
+				// here). Already-exists files and known-failure shortcuts
+				// above never trip this, so a folder that's mostly or
+				// fully already resolved sails through the whole (much
+				// larger) window in one pass regardless of size.
+				if ( $real_attempts >= self::MAX_CONVERSIONS_PER_BATCH ) {
+					break;
+				}
+				++$real_attempts;
+				++$stats['scanned'];
+
 				$outcome = $this->generator->ensure_webp( $source_path );
 
 				if ( 'exists' === $outcome['status'] ) {
+					$this->forget_failure( $file_rel );
 					continue;
 				}
 
@@ -475,14 +816,21 @@ class WWG_Admin {
 				if ( 'created' === $outcome['status'] ) {
 					++$stats['converted'];
 					$stats['webp_bytes'] += $outcome['webp_bytes'];
+					$this->forget_failure( $file_rel ); // Covers recovered successes too.
+					if ( ! empty( $outcome['recovered'] ) ) {
+						$stats['recoveries'][] = array( 'file' => $file_rel );
+					}
 				} else {
 					++$stats['failed'];
+					$error               = isset( $outcome['error'] ) ? $outcome['error'] : '';
 					$stats['failures'][] = array(
-						'file'  => '' === $dir_rel ? $filename : $dir_rel . '/' . $filename,
-						'error' => isset( $outcome['error'] ) ? $outcome['error'] : '',
+						'file'  => $file_rel,
+						'error' => $error,
 					);
+					$this->remember_failure( $file_rel, $source_path, $error );
 				}
 			} else {
+				++$stats['scanned'];
 				$webp_path = preg_replace( '/\.(jpe?g|png)$/i', '.webp', $source_path );
 				if ( file_exists( $webp_path ) ) {
 					continue;
@@ -493,8 +841,34 @@ class WWG_Admin {
 			}
 		}
 
-		$new_offset = $file_offset + count( $slice );
+		// $stats['scanned'] (not count( $slice )) -- the loop above may
+		// have broken early on the real-conversion cap, in which case
+		// fewer files than the full slice were actually looked at, and
+		// resuming must start exactly where it left off, not past the
+		// file that tripped the cap.
+		$new_offset = $file_offset + $stats['scanned'];
 		$dir_done   = $new_offset >= count( $files );
+
+		// $file_offset is the untouched parameter -- process_batch()
+		// never reassigns it -- so "0 === $file_offset && $dir_done"
+		// means precisely "this one call covered the folder's entire
+		// file list, start to finish." $stats['missing'] ===
+		// $stats['converted'] + count( $stable_known_failures ) is
+		// mode-agnostic: scan mode never increments converted or
+		// $stable_known_failures (stays 0/empty -- there's no shortcut
+		// concept there), so this reduces to "nothing missing" there; in
+		// convert mode, missing = converted + failed by construction each
+		// batch, so it's equivalent to "every currently-failed file this
+		// pass is a known one already reconfirmed stable via the shortcut
+		// above, not a fresh first-time failure" -- a folder with any
+		// *fresh* failure is correctly never cached on the pass that
+		// discovers it (its stability isn't known yet), only from the
+		// next pass on, once the shortcut itself has reconfirmed it.
+		$became_clean = ( 0 === $file_offset ) && $dir_done
+			&& ( $stats['missing'] === $stats['converted'] + count( $stable_known_failures ) );
+		if ( $became_clean ) {
+			$this->mark_known_clean( $dir_rel, $abs_dir, $stable_known_failures );
+		}
 
 		return array(
 			'stats'       => $stats,
@@ -502,6 +876,7 @@ class WWG_Admin {
 			'dir_index'   => $dir_done ? $dir_index + 1 : $dir_index,
 			'file_offset' => $dir_done ? 0 : $new_offset,
 			'done'        => false,
+			'skipped'     => false,
 		);
 	}
 }

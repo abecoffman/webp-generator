@@ -78,6 +78,7 @@ class WWG_Job {
 	const ACTION_STATUS  = 'wwg_job_status';
 	const ACTION_CANCEL  = 'wwg_cancel_job';
 	const ACTION_DISMISS = 'wwg_dismiss_job_notice';
+	const ACTION_DRIVE   = 'wwg_drive_job';
 
 	/**
 	 * @var WWG_Admin
@@ -112,6 +113,7 @@ class WWG_Job {
 		add_action( 'wp_ajax_' . self::ACTION_STATUS, array( $this, 'handle_status' ) );
 		add_action( 'wp_ajax_' . self::ACTION_CANCEL, array( $this, 'handle_cancel_job' ) );
 		add_action( 'wp_ajax_' . self::ACTION_DISMISS, array( $this, 'handle_dismiss_notice' ) );
+		add_action( 'wp_ajax_' . self::ACTION_DRIVE, array( $this, 'handle_drive_job' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_render_notice' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_heartbeat_script' ) );
 		add_filter( 'heartbeat_received', array( $this, 'filter_heartbeat' ) );
@@ -155,13 +157,64 @@ class WWG_Job {
 	}
 
 	/**
-	 * The cron callback. No capability/nonce check -- cron dispatches run
-	 * with no current user; authorization already happened when the job
-	 * was scheduled from handle_start_job().
+	 * The cron callback -- a thin delegate so run_tick() and
+	 * handle_drive_job() (the client's fast-path AJAX equivalent) share
+	 * every bit of batch-processing/locking logic via process_one_batch()
+	 * rather than reimplementing it twice. No capability/nonce check here
+	 * -- cron dispatches run with no current user; authorization already
+	 * happened when the job was scheduled from handle_start_job().
 	 */
 	public function run_tick() {
+		$this->process_one_batch();
+	}
+
+	/**
+	 * AJAX: process exactly one batch synchronously and return the
+	 * outcome, bypassing spawn_cron()'s loopback (and the ~60s
+	 * WP_CRON_LOCK_TIMEOUT self-throttle that comes with it) entirely --
+	 * the same way `wp cron event run` does. This is what lets an admin
+	 * actively on the tool page drive the job at full speed while
+	 * run_tick() stays exactly as the "survives closing the tab" safety
+	 * net; both go through process_one_batch() and its LOCK_KEY mutex, so
+	 * they can never double-process the same batch.
+	 */
+	public function handle_drive_job() {
+		check_ajax_referer( WWG_Admin::NONCE_ACTION, 'nonce' );
+
+		if ( ! current_user_can( WWG_Admin::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
+		}
+
+		// Response shape is deliberately {outcome, state}, not a bare
+		// state object like the other AJAX handlers -- the client needs
+		// to tell "locked, try again shortly" apart from "stopped" apart
+		// from "made progress," not just get a state snapshot.
+		wp_send_json_success( $this->process_one_batch() );
+	}
+
+	/**
+	 * The single place that acquires LOCK_KEY, validates the job is
+	 * still running, runs one real batch, merges its results into state,
+	 * handles the done transition, and (re)schedules the cron safety
+	 * net -- called by both run_tick() (cron) and handle_drive_job()
+	 * (the client's fast path), so their behavior can't drift apart.
+	 *
+	 * @return array {
+	 *     @type string $outcome One of:
+	 *       'locked'   - another process holds the lock; no work done.
+	 *       'stopped'  - state isn't 'running'; caller should stop.
+	 *       'advanced' - one batch processed, job continues.
+	 *       'done'     - this batch finished the job.
+	 *     @type array  $state Fresh state for advanced/done/stopped;
+	 *                  last-known state for locked.
+	 * }
+	 */
+	private function process_one_batch() {
 		if ( get_transient( self::LOCK_KEY ) ) {
-			return;
+			return array(
+				'outcome' => 'locked',
+				'state'   => $this->get_state(),
+			);
 		}
 		set_transient( self::LOCK_KEY, time(), self::LOCK_TTL );
 
@@ -169,11 +222,14 @@ class WWG_Job {
 
 		if ( 'running' !== $state['status'] ) {
 			// Cancelled (or otherwise no longer running) between this
-			// event being scheduled and now -- do no work, and don't
-			// reschedule; whatever cancelled it already cleared the
+			// batch being scheduled/requested and now -- do no work, and
+			// don't reschedule; whatever stopped it already cleared the
 			// schedule itself.
 			delete_transient( self::LOCK_KEY );
-			return;
+			return array(
+				'outcome' => 'stopped',
+				'state'   => $state,
+			);
 		}
 
 		$result = $this->admin->run_job_batch( $state['cursor']['dir_index'], $state['cursor']['file_offset'], 'convert' );
@@ -198,6 +254,17 @@ class WWG_Job {
 			);
 		}
 
+		if ( ! empty( $result['stats']['recoveries'] ) ) {
+			// Same array-merge-and-cap treatment as failures above --
+			// recoveries are expected to be rare, but not bounding this
+			// would still be an unbounded-growth risk on a pathological
+			// library.
+			$state['stats']['recoveries'] = array_slice(
+				array_merge( $state['stats']['recoveries'], $result['stats']['recoveries'] ),
+				-500
+			);
+		}
+
 		if ( $result['done'] ) {
 			$state['status']      = 'done';
 			$state['finished_at'] = time();
@@ -210,12 +277,20 @@ class WWG_Job {
 
 			$this->write_state( $state );
 			delete_transient( self::LOCK_KEY );
-			return;
+			return array(
+				'outcome' => 'done',
+				'state'   => $state,
+			);
 		}
 
 		$this->write_state( $state );
 		delete_transient( self::LOCK_KEY );
 		$this->ensure_scheduled();
+
+		return array(
+			'outcome' => 'advanced',
+			'state'   => $state,
+		);
 	}
 
 	/**
@@ -429,7 +504,18 @@ class WWG_Job {
 			return $this->default_state();
 		}
 
-		return array_merge( $this->default_state(), $state );
+		$defaults = $this->default_state();
+		$state    = array_merge( $defaults, $state );
+
+		// Nested merge for 'stats' specifically -- the array_merge() above
+		// only guards missing top-level keys; a state transient persisted
+		// by an older version of this plugin (e.g. a run left paused
+		// across an upgrade) would otherwise still be missing a stats key
+		// added later (like 'recoveries'), since array_merge() replaces
+		// 'stats' wholesale rather than merging into it.
+		$state['stats'] = array_merge( $defaults['stats'], is_array( $state['stats'] ) ? $state['stats'] : array() );
+
+		return $state;
 	}
 
 	/**
@@ -475,6 +561,7 @@ class WWG_Job {
 				'original_bytes' => 0,
 				'webp_bytes'     => 0,
 				'failures'       => array(),
+				'recoveries'     => array(),
 			),
 			'total_missing' => 0,
 			'current_dir'   => '',
