@@ -221,11 +221,16 @@
 				.replace( '%2$s', formatBytes( totals.originalBytes ) );
 			// Some of the "missing" count above may be files already known
 			// to fail permanently (an earlier Generate run found this out
-			// and remembered it) -- called out separately so it's clear
-			// Generate isn't starting from zero information, and so those
-			// files are visible before even clicking it.
+			// and remembered it) -- called out as an explicit *subset* of
+			// that count ("Of these, N…"), not a second, seemingly separate
+			// number the way reusing failedSummary's "N failed" would read
+			// (that string also describes an attempt that just happened,
+			// which isn't true here -- Scan never attempts a conversion).
 			if ( totals.failures.length ) {
-				summary += ' ' + wwgAdmin.strings.failedSummary.replace( '%d', totals.failures.length );
+				var knownFailuresTemplate = totals.failures.length === 1
+					? wwgAdmin.strings.missingKnownFailuresSingular
+					: wwgAdmin.strings.missingKnownFailuresPlural;
+				summary += ' ' + knownFailuresTemplate.replace( '%d', totals.failures.length );
 			}
 			els.summary.textContent = summary;
 			els.generateBtn.disabled = els.panel.getAttribute( 'data-webp-supported' ) !== '1';

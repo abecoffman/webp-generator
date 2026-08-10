@@ -282,25 +282,42 @@ class WWG_Admin {
 	 */
 	public static function get_strings() {
 		return array(
-			'confirmGenerate' => __( 'Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'webp-generator' ),
+			'confirmGenerate'              => __( 'Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'webp-generator' ),
 			/* translators: %s: folder path currently being scanned, e.g. "2024/03". Substituted client-side in admin.js. */
-			'checking'        => __( 'Checking %s…', 'webp-generator' ),
+			'checking'                     => __( 'Checking %s…', 'webp-generator' ),
 			/* translators: %s: folder path currently being processed, e.g. "2024/03". Substituted client-side in admin.js. */
-			'converting'      => __( 'Generating %s…', 'webp-generator' ),
+			'converting'                   => __( 'Generating %s…', 'webp-generator' ),
 			/* translators: %s: folder path currently being walked, e.g. "2024/03". Substituted client-side in admin.js. Shown once every missing image Scan found has already been processed -- the run keeps walking the rest of the library to catch anything Scan might have missed, but isn't converting anything new, so this deliberately doesn't say "Generating" like the string above. */
-			'stillScanning'   => __( 'All missing images found -- finishing folder scan (%s)…', 'webp-generator' ),
-			'uploadsRoot'     => __( 'the uploads folder', 'webp-generator' ),
+			'stillScanning'                => __( 'All missing images found -- finishing folder scan (%s)…', 'webp-generator' ),
+			'uploadsRoot'                  => __( 'the uploads folder', 'webp-generator' ),
 			/* translators: %d: number of images scanned so far. */
-			'scannedSoFar'    => __( '%d images scanned so far…', 'webp-generator' ),
+			'scannedSoFar'                 => __( '%d images scanned so far…', 'webp-generator' ),
 			/* translators: %d: number of images generated so far. */
-			'generatedSoFar'  => __( '%d images generated so far…', 'webp-generator' ),
+			'generatedSoFar'               => __( '%d images generated so far…', 'webp-generator' ),
 			/* translators: %d: number of images generated. Shown once every missing image Scan found has been processed -- unlike 'generatedSoFar' above, this is the final count for this run (only the "finishing folder scan" walk is left, which won't change it further), so it deliberately doesn't say "so far". */
-			'generatedFinal'  => __( '%d image(s) generated.', 'webp-generator' ),
-			'missingNone'     => __( 'Every image already has a .webp version. Nothing to generate.', 'webp-generator' ),
+			'generatedFinal'               => __( '%d image(s) generated.', 'webp-generator' ),
+			'missingNone'                  => __( 'Every image already has a .webp version. Nothing to generate.', 'webp-generator' ),
 			/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB". */
-			'missingPlural'   => __( '%1$d images are missing a .webp version (%2$s).', 'webp-generator' ),
+			'missingPlural'                => __( '%1$d images are missing a .webp version (%2$s).', 'webp-generator' ),
 			/* translators: 1: combined file size, e.g. "420 KB". */
-			'missingSingular' => __( '1 image is missing a .webp version (%2$s).', 'webp-generator' ),
+			'missingSingular'              => __( '1 image is missing a .webp version (%2$s).', 'webp-generator' ),
+			// Appended after missingSingular/missingPlural above, only when
+			// some (or all) of that same missing count is already known --
+			// from an earlier run -- to permanently fail. Deliberately its
+			// own "Of these, N..." sentence rather than reusing
+			// failedSummary below: failedSummary's "%d failed" describes an
+			// attempt that just happened (Convert/Generate just ran), which
+			// isn't true here (Scan never attempts a conversion) -- and
+			// unlike Convert's generated/failed counts, which are disjoint,
+			// this count is a *subset* of the missing count in the sentence
+			// right before it, so it needs to read as "of those, some are
+			// already known-dead" rather than a second, seemingly separate
+			// number.
+			/* translators: %d: how many of the missing images above (always > 1) already have a known, permanent failure reason on record. */
+			'missingKnownFailuresPlural'   => __( 'Of these, %d are already known to permanently fail -- see "Failed conversions" for details.', 'webp-generator' ),
+			// Used instead of the above when that count is exactly 1 -- its
+			// own string (not a %d substitution) to avoid "Of these, 1 are…".
+			'missingKnownFailuresSingular' => __( 'Of these, 1 is already known to permanently fail -- see "Failed conversions" for details.', 'webp-generator' ),
 			// Full "Done -- generated N, M failed" phrasing for contexts
 			// with no other supporting UI around them -- the completion
 			// notice (WWG_Job::maybe_render_notice()) and the Heartbeat
@@ -311,21 +328,21 @@ class WWG_Admin {
 			// line too would just be the same sentence twice in a row;
 			// see 'doneLabel' below for what the tool page uses instead.
 			/* translators: %d: number of images. */
-			'generateDone'    => __( 'Done -- generated %d image(s).', 'webp-generator' ),
+			'generateDone'                 => __( 'Done -- generated %d image(s).', 'webp-generator' ),
 			/* translators: %d: number of images that failed to convert. Deliberately doesn't say "below"/"above" -- this string is reused in more than one place on the page relative to the "Failed conversions" panel it points at, so a directional reference goes stale wherever it ends up on the wrong side. */
-			'failedSummary'   => __( '%d failed -- see "Failed conversions" for details.', 'webp-generator' ),
-			'cacheCleared'    => __( 'Also cleared the page cache so these take effect right away.', 'webp-generator' ),
+			'failedSummary'                => __( '%d failed -- see "Failed conversions" for details.', 'webp-generator' ),
+			'cacheCleared'                 => __( 'Also cleared the page cache so these take effect right away.', 'webp-generator' ),
 			// What the tool page's own log line says on completion --
 			// short, since the summary line right above it already
 			// carries the actual count+failed tally (see 'generateDone'
 			// above for why this doesn't repeat it).
-			'doneLabel'       => __( 'Done.', 'webp-generator' ),
-			'paused'          => __( 'Paused. Click "Generate" to pick up where this left off.', 'webp-generator' ),
-			'vsOriginal'      => __( 'vs.', 'webp-generator' ),
-			'folders'         => __( 'folders', 'webp-generator' ),
-			'images'          => __( 'images', 'webp-generator' ),
-			'viewResults'     => __( 'View results →', 'webp-generator' ),
-			'error'           => __( 'Something went wrong:', 'webp-generator' ),
+			'doneLabel'                    => __( 'Done.', 'webp-generator' ),
+			'paused'                       => __( 'Paused. Click "Generate" to pick up where this left off.', 'webp-generator' ),
+			'vsOriginal'                   => __( 'vs.', 'webp-generator' ),
+			'folders'                      => __( 'folders', 'webp-generator' ),
+			'images'                       => __( 'images', 'webp-generator' ),
+			'viewResults'                  => __( 'View results →', 'webp-generator' ),
+			'error'                        => __( 'Something went wrong:', 'webp-generator' ),
 		);
 	}
 
