@@ -78,9 +78,13 @@ class WWG_Admin {
 	/**
 	 * Option holding a file_rel => {size, mtime, error} map of individual
 	 * files known to permanently fail conversion (e.g. a 0-byte file, or
-	 * one with corrupt image data) -- convert mode consults this to skip
+	 * one with corrupt image data). Convert mode consults this to skip
 	 * straight to reporting the remembered failure instead of re-running
-	 * an expensive, doomed Imagick/GD decode attempt every single run.
+	 * an expensive, doomed Imagick/GD decode attempt every single run;
+	 * scan mode consults the same record too (it never attempts a real
+	 * decode either way) so a known failure is reported identically no
+	 * matter which tool notices it first, rather than showing up as an
+	 * undifferentiated "missing" count only Convert knows is a lost cause.
 	 * Self-invalidates the same way OPTION_CLEAN_DIRS does: if the file's
 	 * size/mtime ever change, it's stale and gets a real re-attempt (see
 	 * is_known_failure()).
@@ -721,14 +725,12 @@ class WWG_Admin {
 					continue; // Shouldn't happen -- is_known_clean() just checked this -- but never trust a stat() race blindly.
 				}
 				++$stats['missing'];
+				++$stats['failed'];
 				$stats['original_bytes'] += $entry['size'];
-				if ( 'convert' === $mode ) {
-					++$stats['failed'];
-					$stats['failures'][] = array(
-						'file'  => $file_rel,
-						'error' => $entry['error'],
-					);
-				}
+				$stats['failures'][]      = array(
+					'file'  => $file_rel,
+					'error' => $entry['error'],
+				);
 			}
 
 			return array(
@@ -759,35 +761,39 @@ class WWG_Admin {
 		foreach ( $slice as $filename ) {
 			$source_path = $abs_dir . '/' . $filename;
 			$file_rel    = '' === $dir_rel ? $filename : $dir_rel . '/' . $filename;
+			$webp_path   = preg_replace( '/\.(jpe?g|png)$/i', '.webp', $source_path );
+
+			// Belt-and-suspenders, both modes: a .webp may have appeared
+			// some other way (manual upload, another tool) since a
+			// failure was last remembered for this file -- checked before
+			// the known-failure shortcut so a stale record can never mask
+			// a file that's already actually fine, regardless of which
+			// mode happens to notice first.
+			if ( file_exists( $webp_path ) ) {
+				++$stats['scanned'];
+				$this->forget_failure( $file_rel );
+				continue;
+			}
+
+			// Known-failure shortcut, both modes: cheap (a stat, not a
+			// decode), and reported identically in either mode's stats --
+			// a permanent failure doesn't become less permanent because
+			// Scan found it instead of Generate.
+			$known_failure = $this->is_known_failure( $file_rel, $source_path );
+			if ( false !== $known_failure ) {
+				++$stats['scanned'];
+				++$stats['missing'];
+				++$stats['failed'];
+				$stats['original_bytes'] += $known_failure['size'];
+				$stats['failures'][]      = array(
+					'file'  => $file_rel,
+					'error' => $known_failure['error'],
+				);
+				$stable_known_failures[]  = $file_rel;
+				continue; // No real decode attempt -- doesn't touch $real_attempts/the cap below.
+			}
 
 			if ( 'convert' === $mode ) {
-				$webp_path = preg_replace( '/\.(jpe?g|png)$/i', '.webp', $source_path );
-
-				// Belt-and-suspenders: a .webp may have appeared some
-				// other way (manual upload, another tool) since a failure
-				// was last remembered for this file -- checked before the
-				// known-failure shortcut so a stale record can never mask
-				// a file that's already actually fine.
-				if ( file_exists( $webp_path ) ) {
-					++$stats['scanned'];
-					$this->forget_failure( $file_rel );
-					continue;
-				}
-
-				$known_failure = $this->is_known_failure( $file_rel, $source_path );
-				if ( false !== $known_failure ) {
-					++$stats['scanned'];
-					++$stats['missing'];
-					++$stats['failed'];
-					$stats['original_bytes'] += $known_failure['size'];
-					$stats['failures'][]      = array(
-						'file'  => $file_rel,
-						'error' => $known_failure['error'],
-					);
-					$stable_known_failures[]  = $file_rel;
-					continue; // No real decode attempt -- doesn't touch $real_attempts/the cap below.
-				}
-
 				// Only the real-conversion path is expensive -- once this
 				// batch has attempted MAX_CONVERSIONS_PER_BATCH of them,
 				// stop and leave the rest of the slice for the next call
@@ -805,6 +811,10 @@ class WWG_Admin {
 				$outcome = $this->generator->ensure_webp( $source_path );
 
 				if ( 'exists' === $outcome['status'] ) {
+					// Shouldn't normally happen -- the shared file_exists()
+					// check above just confirmed no .webp -- but a race
+					// (something else creating it in between) is possible;
+					// treat it the same as that check would have.
 					$this->forget_failure( $file_rel );
 					continue;
 				}
@@ -831,10 +841,6 @@ class WWG_Admin {
 				}
 			} else {
 				++$stats['scanned'];
-				$webp_path = preg_replace( '/\.(jpe?g|png)$/i', '.webp', $source_path );
-				if ( file_exists( $webp_path ) ) {
-					continue;
-				}
 				++$stats['missing'];
 				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish or become unreadable between the directory listing above and this stat() call; (int) cast already turns a false return into a harmless 0.
 				$stats['original_bytes'] += (int) @filesize( $source_path );
@@ -854,16 +860,19 @@ class WWG_Admin {
 		// means precisely "this one call covered the folder's entire
 		// file list, start to finish." $stats['missing'] ===
 		// $stats['converted'] + count( $stable_known_failures ) is
-		// mode-agnostic: scan mode never increments converted or
-		// $stable_known_failures (stays 0/empty -- there's no shortcut
-		// concept there), so this reduces to "nothing missing" there; in
-		// convert mode, missing = converted + failed by construction each
-		// batch, so it's equivalent to "every currently-failed file this
-		// pass is a known one already reconfirmed stable via the shortcut
-		// above, not a fresh first-time failure" -- a folder with any
-		// *fresh* failure is correctly never cached on the pass that
-		// discovers it (its stability isn't known yet), only from the
-		// next pass on, once the shortcut itself has reconfirmed it.
+		// mode-agnostic: the known-failure shortcut (and so
+		// $stable_known_failures) is shared by both modes, but only
+		// convert mode ever increments $stats['converted'] (scan mode
+		// never attempts a real conversion, so it stays 0 there) -- for
+		// scan mode this reduces to "every missing file is a known,
+		// reconfirmed-stable failure"; for convert mode, missing =
+		// converted + failed by construction each batch, so it's
+		// equivalent to "every currently-failed file this pass is a known
+		// one already reconfirmed stable via the shortcut above, not a
+		// fresh first-time failure" -- a folder with any *fresh* failure
+		// is correctly never cached on the pass that discovers it (its
+		// stability isn't known yet), only from the next pass on, once
+		// the shortcut itself (in either mode) has reconfirmed it.
 		$became_clean = ( 0 === $file_offset ) && $dir_done
 			&& ( $stats['missing'] === $stats['converted'] + count( $stable_known_failures ) );
 		if ( $became_clean ) {

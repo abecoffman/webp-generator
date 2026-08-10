@@ -535,6 +535,52 @@ class AdminBatchingTest extends TestCase {
 		$this->assertSame( 1, $rechecked['stats']['scanned'] ); // a real recheck happened, not a silent skip.
 	}
 
+	// ---- Scan mode also knows about known failures (not just convert) ----
+	//
+	// Scan mode never attempts a real decode, so it can only ever
+	// *re-surface* an already-discovered failure (established by an
+	// earlier convert pass), not discover a new one -- but once one
+	// exists, scan should report it exactly like convert does, not lump
+	// it into an undifferentiated "missing" count.
+
+	public function test_scan_mode_surfaces_a_known_failure_the_same_way_convert_does() {
+		$dir = $this->fixture_dir . '/2024/13';
+		mkdir( $dir, 0777, true );
+		file_put_contents( $dir . '/broken.jpg', 'not a real jpeg' );
+
+		$dirs = array( '2024/13' );
+
+		// Establish the known-failure record via a real (convert) pass
+		// first -- see the note above.
+		$this->process_batch( $dirs, 0, 0, 'convert' );
+
+		$scan = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertSame( 1, $scan['stats']['missing'] );
+		$this->assertSame( 1, $scan['stats']['failed'] );
+		$this->assertSame( '2024/13/broken.jpg', $scan['stats']['failures'][0]['file'] );
+	}
+
+	public function test_scan_mode_can_also_reconfirm_a_known_failure_and_unlock_the_folder_cache() {
+		$dir = $this->fixture_dir . '/2024/14';
+		mkdir( $dir, 0777, true );
+		file_put_contents( $dir . '/broken.jpg', 'not a real jpeg' );
+
+		$dirs = array( '2024/14' );
+
+		$this->process_batch( $dirs, 0, 0, 'convert' ); // fresh failure, established.
+		$this->assertArrayNotHasKey( '2024/14', $this->clean_dirs() );
+
+		// Reconfirm via SCAN this time, not another convert pass.
+		$scan = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertSame( 1, $scan['stats']['failed'] );
+		$this->assertArrayHasKey( '2024/14', $this->clean_dirs() ); // scan alone was enough to unlock the folder cache.
+
+		$skipped_scan = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertTrue( $skipped_scan['skipped'] );
+		$this->assertSame( 0, $skipped_scan['stats']['scanned'] );
+		$this->assertSame( 1, $skipped_scan['stats']['failed'] ); // still reported, even though skipped.
+	}
+
 	/**
 	 * @return array
 	 */

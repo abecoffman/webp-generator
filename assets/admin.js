@@ -132,7 +132,7 @@
 	// ---- Scan: unchanged, small bounded client-driven loop ----
 
 	function freshScanTotals() {
-		return { scanned: 0, missing: 0, originalBytes: 0 };
+		return { scanned: 0, missing: 0, originalBytes: 0, failures: [] };
 	}
 
 	function runScan() {
@@ -176,6 +176,13 @@
 			totals.scanned += data.stats.scanned;
 			totals.missing += data.stats.missing;
 			totals.originalBytes += data.stats.original_bytes;
+			if ( data.stats.failures && data.stats.failures.length ) {
+				// Known permanent failures Scan is just re-surfacing (it
+				// never attempts a real decode itself) -- capped the same
+				// way the Generate job's own accumulated stats are, purely
+				// defensive since this is expected to stay tiny in practice.
+				totals.failures = totals.failures.concat( data.stats.failures ).slice( -500 );
+			}
 
 			var pct = data.total_dirs ? Math.min( 100, Math.round( ( data.dir_index / data.total_dirs ) * 100 ) ) : 100;
 			els.progressFill.style.width = pct + '%';
@@ -209,11 +216,24 @@
 			els.generateBtn.disabled = true;
 		} else {
 			var template = totals.missing === 1 ? wwgAdmin.strings.missingSingular : wwgAdmin.strings.missingPlural;
-			els.summary.textContent = template
+			var summary = template
 				.replace( '%1$d', totals.missing )
 				.replace( '%2$s', formatBytes( totals.originalBytes ) );
+			// Some of the "missing" count above may be files already known
+			// to fail permanently (an earlier Generate run found this out
+			// and remembered it) -- called out separately so it's clear
+			// Generate isn't starting from zero information, and so those
+			// files are visible before even clicking it.
+			if ( totals.failures.length ) {
+				summary += ' ' + wwgAdmin.strings.failedSummary.replace( '%d', totals.failures.length );
+			}
+			els.summary.textContent = summary;
 			els.generateBtn.disabled = els.panel.getAttribute( 'data-webp-supported' ) !== '1';
 			scanMissingCount = totals.missing;
+		}
+
+		if ( totals.failures.length ) {
+			renderFailuresList( totals.failures );
 		}
 		// "Scan" stays disabled -- one scan per page load, by design;
 		// reload the page for a fresh count.
@@ -331,8 +351,10 @@
 		els.progressLabel.textContent = pct + '% (' + processed + ' / ' + target + ' ' + wwgAdmin.strings.images + ')';
 	}
 
-	function renderFailures() {
-		var failures = jobState.stats.failures;
+	// Shared by both Generate's per-poll render (below) and Scan's
+	// end-of-run summary (finishScan()) -- a known failure reads the same
+	// whichever tool surfaced it.
+	function renderFailuresList( failures ) {
 		if ( ! failures.length ) {
 			return;
 		}
@@ -349,6 +371,10 @@
 			li.textContent = failure.file + ': ' + failure.error;
 			els.failuresList.appendChild( li );
 		} );
+	}
+
+	function renderFailures() {
+		renderFailuresList( jobState.stats.failures );
 	}
 
 	function renderRecoveries() {
