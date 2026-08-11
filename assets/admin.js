@@ -1,8 +1,24 @@
 /**
  * Drives the Tools > WebP Generator "Generate WebP Images" panel.
  *
+ * The panel is three regions, always in the same place:
+ *   1. Library Status  -- what's currently known about the media library
+ *      (a persisted server-side snapshot of Scan's last completed run --
+ *      see WWG_Admin::OPTION_SCAN_STATE -- so it survives a reload
+ *      instead of resetting to blank).
+ *   2. Actions -- the Scan/Generate/Cancel buttons.
+ *   3. Generate Results -- Generate's own live progress while running,
+ *      settling into a dated "last run" record once done (a persisted
+ *      WWG_Job state, same as before).
+ * Each region's *substate* changes in place (a small status dot + label)
+ * rather than jumping to a different part of the page, and each is
+ * rendered from server-authoritative state on every page load, not just
+ * live updates -- the same rule applies whether a state just became true
+ * a second ago or three weeks ago.
+ *
  * Scan is a small, bounded client-driven loop: JS calls WWG_Admin's AJAX
- * endpoint, gets a cursor back, calls again, until done.
+ * endpoint, gets a cursor back, calls again, until done, then saves the
+ * final tally server-side.
  *
  * Generate is different: it runs as a WP-Cron background job (see
  * WWG_Job) so it keeps going even if this tab closes. While the tab
@@ -16,32 +32,16 @@
  * page load able to resume mid-run at full speed: the state this boots
  * from (`wwgAdmin.jobState`) is the server's, not something this script
  * has to have built up itself in the current pageview.
- *
- *  1. Only "Scan" starts enabled (unless a Generate job is already
- *     running/paused/done from a previous pageview -- see bootGenerate()).
- *  2. Scan runs, live count climbing, until it's walked the whole
- *     uploads tree once.
- *  3. Scan finishes: shows how many images are missing a .webp, enables
- *     "Generate", disables "Scan" (one scan per page load).
- *  4. Generate starts the background job and drives it at full speed
- *     while this tab stays open; enables "Cancel", disables "Generate".
- *     Reloading the page while this is running resumes driving
- *     immediately, no click needed -- closing the tab instead just
- *     stops the fast path, falling back to WP-Cron's own (slower, but
- *     unattended) pace.
- *  5. Cancel pauses the job server-side -- progress and cursor are kept,
- *     not discarded -- and re-enables "Generate" to resume from exactly
- *     where it left off, even across a reload.
- *  6. The job finishing naturally (not cancelled) disables every button
- *     and shows the final summary -- also true immediately on page load
- *     if it finished while this tab was elsewhere.
  */
 ( function () {
 	'use strict';
 
 	var els = {};
 	var scanRunning = false;
+	var startingJob = false; // true only for the brief round-trip starting/resuming a job -- prevents a rapid double-click firing wwg_start_job twice.
 	var jobState = null;
+	var scanState = null;
+	var generateDefaultLabel = '';
 
 	// The authoritative "should the drive loop keep going" flag -- not
 	// just a pending timeout handle, since during the normal fast-path
@@ -56,19 +56,30 @@
 	var driveRetryDelay = 400; // ms; doubles on 'locked', capped below.
 	var DRIVE_RETRY_MAX_MS = 5000;
 
-	// Scan's missing-image count, needed once: as the target Generate's
-	// progress bar is sized against when it starts a fresh job. Only
-	// relevant for a *fresh* start -- Generate stays disabled until Scan
-	// finishes in the same pageview, so this is always set by the time
-	// it's read; resuming a paused/already-running job (from this or an
-	// earlier pageview) uses the target the server already recorded.
-	var scanMissingCount = 0;
-
 	document.addEventListener( 'DOMContentLoaded', function () {
 		els.panel = document.querySelector( '.wwg-panel' );
 		els.scanBtn = document.getElementById( 'wwg-scan' );
 		els.generateBtn = document.getElementById( 'wwg-generate' );
 		els.cancelBtn = document.getElementById( 'wwg-cancel' );
+
+		// Region 1: Library Status.
+		els.statusDot = document.getElementById( 'wwg-status-dot' );
+		els.statusChipLabel = document.getElementById( 'wwg-status-chip-label' );
+		els.statusIdle = document.getElementById( 'wwg-status-idle' );
+		els.statusHeadline = document.getElementById( 'wwg-status-headline' );
+		els.statusMeta = document.getElementById( 'wwg-status-meta' );
+		els.statusProgress = document.getElementById( 'wwg-status-progress' );
+		els.statusProgressFill = els.statusProgress.querySelector( '.wwg-progress-bar-fill' );
+		els.statusProgressLabel = els.statusProgress.querySelector( '.wwg-progress-label' );
+		els.statusLog = document.getElementById( 'wwg-status-log' );
+		els.statusFailures = document.getElementById( 'wwg-status-failures' );
+		els.statusFailuresCount = document.getElementById( 'wwg-status-failures-count' );
+		els.statusFailuresList = document.getElementById( 'wwg-status-failures-list' );
+
+		// Region 3: Generate Results.
+		els.resultsBox = document.getElementById( 'wwg-results-box' );
+		els.resultsDot = document.getElementById( 'wwg-results-dot' );
+		els.resultsChipLabel = document.getElementById( 'wwg-results-chip-label' );
 		els.progress = document.getElementById( 'wwg-progress' );
 		els.progressFill = els.progress.querySelector( '.wwg-progress-bar-fill' );
 		els.progressLabel = els.progress.querySelector( '.wwg-progress-label' );
@@ -83,12 +94,14 @@
 		els.log = document.getElementById( 'wwg-log' );
 
 		jobState = wwgAdmin.jobState;
+		scanState = wwgAdmin.scanState;
+		generateDefaultLabel = els.generateBtn.textContent;
 
 		els.scanBtn.addEventListener( 'click', runScan );
 		els.generateBtn.addEventListener( 'click', onGenerateClick );
 		els.cancelBtn.addEventListener( 'click', requestCancel );
 
-		bootGenerate();
+		boot();
 	} );
 
 	function formatBytes( bytes ) {
@@ -139,7 +152,167 @@
 			} );
 	}
 
-	// ---- Scan: unchanged, small bounded client-driven loop ----
+	function requestSaveScanResult( totals ) {
+		return requestJobAction( wwgAdmin.scanSaveAction, {
+			missing: totals.missing,
+			original_bytes: totals.originalBytes,
+			// A JSON string, not repeated form fields -- each entry is a
+			// {file, error} pair, and PHP decodes this the same way it
+			// already treats the rest of this endpoint's input: capped,
+			// sanitized, never trusted length-wise.
+			failures: JSON.stringify( totals.failures.slice( -500 ) ),
+		} );
+	}
+
+	// ---- Shared rendering helpers (both Region 1 and Region 3 use these) ----
+
+	function setStatusDot( el, state ) {
+		el.className = 'wwg-status-dot wwg-status-dot--' + state;
+	}
+
+	function setChipLabel( el, state, text ) {
+		el.textContent = text;
+		el.className = 'wwg-status-chip-label' + ( state && 'idle' !== state ? ' wwg-status-chip-label--' + state : '' );
+	}
+
+	// Shared by Region 1's own "Failed conversions" (known failures Scan
+	// re-surfaced) and Region 3's (this Generate run's failures) -- a
+	// failure reads the same regardless of which box is reporting it.
+	function renderFailuresInto( listEl, countEl, detailsEl, failures ) {
+		if ( ! failures || ! failures.length ) {
+			detailsEl.hidden = true;
+			return;
+		}
+		detailsEl.hidden = false;
+		countEl.textContent = failures.length;
+
+		// Keep the DOM light on a run with hundreds of failures -- the
+		// count above already reflects the true total, this list is for
+		// spot-checking specific files, not an exhaustive report.
+		var toShow = failures.slice( -50 );
+		listEl.innerHTML = '';
+		toShow.forEach( function ( failure ) {
+			var li = document.createElement( 'li' );
+			li.textContent = failure.file + ': ' + failure.error;
+			listEl.appendChild( li );
+		} );
+	}
+
+	// The one place Scan/Generate/Cancel's enabled/disabled state and
+	// Generate's label are decided -- called at the end of every render
+	// function in both regions so the buttons can never drift out of
+	// sync with what's actually on screen (past bugs in this file were
+	// exactly that: button state set ad hoc in several different places
+	// that could disagree with each other).
+	function updateActionButtons() {
+		var jobRunning = 'running' === jobState.status;
+		var jobPaused = 'paused' === jobState.status;
+		var webpSupported = '1' === els.panel.getAttribute( 'data-webp-supported' );
+
+		// Neither button is ever usable at all on a server that can't
+		// produce .webp -- see the readme's own FAQ: "Scan/Generate are
+		// disabled until that's resolved, rather than letting you run a
+		// tool that can't do anything." Scan doesn't strictly need a
+		// working backend itself (it only checks file_exists()), but
+		// there'd be nothing useful to do with what it finds.
+		els.scanBtn.disabled = scanRunning || jobRunning || startingJob || ! webpSupported;
+		els.cancelBtn.disabled = ! jobRunning;
+
+		if ( jobPaused ) {
+			els.generateBtn.textContent = wwgAdmin.strings.resumeGenerating;
+			els.generateBtn.disabled = scanRunning || startingJob || ! webpSupported;
+			return;
+		}
+
+		els.generateBtn.textContent = generateDefaultLabel;
+		els.generateBtn.disabled = jobRunning
+			|| scanRunning
+			|| startingJob
+			|| ! webpSupported
+			|| ! scanState.finished_at // never scanned, or invalidated back to "not checked" -- see renderStatusIdle().
+			|| !! scanState.invalidated_at
+			|| 0 === scanState.missing;
+	}
+
+	// ---- Region 1: Library Status ----
+
+	function renderStatusIdle() {
+		setStatusDot( els.statusDot, 'idle' );
+		setChipLabel( els.statusChipLabel, 'idle', wwgAdmin.strings.libraryStatusLabel );
+		els.statusIdle.hidden = false;
+		els.statusProgress.hidden = true;
+		els.statusLog.hidden = true;
+		els.statusFailures.hidden = true;
+
+		els.statusHeadline.textContent = wwgAdmin.strings.notCheckedYet;
+		els.statusMeta.textContent = scanState.invalidated_at
+			? wwgAdmin.strings.notCheckedYetInvalidated
+			: wwgAdmin.strings.notCheckedYetFirstTime;
+
+		updateActionButtons();
+	}
+
+	function renderStatusScanning( pct, label, currentDirLog ) {
+		setStatusDot( els.statusDot, 'live' );
+		setChipLabel( els.statusChipLabel, 'live', wwgAdmin.strings.scanningLabel );
+		els.statusIdle.hidden = true;
+		els.statusFailures.hidden = true; // a prior scan's list shouldn't linger while a fresh one runs.
+
+		els.statusProgress.hidden = false;
+		els.statusProgressFill.style.width = pct + '%';
+		els.statusProgressLabel.textContent = label;
+
+		els.statusLog.hidden = ! currentDirLog;
+		els.statusLog.textContent = currentDirLog || '';
+
+		updateActionButtons();
+	}
+
+	function renderStatusDone() {
+		setStatusDot( els.statusDot, 'done' );
+		setChipLabel( els.statusChipLabel, 'done', wwgAdmin.strings.libraryStatusLabel );
+		els.statusIdle.hidden = false;
+		els.statusProgress.hidden = true;
+		els.statusLog.hidden = true;
+
+		if ( 0 === scanState.missing ) {
+			els.statusHeadline.textContent = wwgAdmin.strings.missingNone;
+		} else {
+			var template = 1 === scanState.missing ? wwgAdmin.strings.missingSingular : wwgAdmin.strings.missingPlural;
+			var headline = template
+				.replace( '%1$d', scanState.missing )
+				.replace( '%2$s', formatBytes( scanState.original_bytes ) );
+
+			// Some of the "missing" count above may be files already known
+			// to fail permanently -- called out as an explicit *subset* of
+			// that count ("Of these, N…"), not a second, seemingly separate
+			// number (see missingKnownFailures*'s own docblock in PHP).
+			if ( scanState.failures.length ) {
+				var knownTemplate = 1 === scanState.failures.length
+					? wwgAdmin.strings.missingKnownFailuresSingular
+					: wwgAdmin.strings.missingKnownFailuresPlural;
+				headline += ' ' + knownTemplate.replace( '%d', scanState.failures.length );
+			}
+			els.statusHeadline.textContent = headline;
+		}
+
+		els.statusMeta.textContent = wwgAdmin.strings.asOf.replace( '%s', formatDateTime( scanState.finished_at ) );
+		renderFailuresInto( els.statusFailuresList, els.statusFailuresCount, els.statusFailures, scanState.failures );
+
+		updateActionButtons();
+	}
+
+	// Renders whatever scanState currently says -- used both right after
+	// a scan finishes and to hydrate the box on a plain page load, since
+	// (per the whole point of persisting this) those must render
+	// identically.
+	function renderStatusFromState() {
+		if ( ! scanState.finished_at || scanState.invalidated_at ) {
+			renderStatusIdle();
+		} else {
+			renderStatusDone();
+		}
+	}
 
 	function freshScanTotals() {
 		return { scanned: 0, missing: 0, originalBytes: 0, failures: [] };
@@ -150,35 +323,16 @@
 			return;
 		}
 		scanRunning = true;
-
-		els.scanBtn.disabled = true;
-		els.generateBtn.disabled = true;
-		els.cancelBtn.disabled = true;
-
-		els.progress.hidden = false;
-		els.progressFill.style.width = '0%';
-		els.progressLabel.textContent = '';
-		els.log.textContent = '';
-		els.summary.textContent = wwgAdmin.strings.scannedSoFar.replace( '%d', 0 );
-
-		// A fresh Scan means a fresh picture is coming -- a previous
-		// run's Generate results (now possibly stale, especially the
-		// "done" case Scan being re-enabled at all is meant to let
-		// someone check again from) shouldn't linger next to it looking
-		// like part of the new scan. Generate re-populates/un-hides
-		// these itself the moment it actually starts.
-		els.convertResults.hidden = true;
-		els.failures.hidden = true;
-		els.recoveries.hidden = true;
-
+		renderStatusScanning( 0, '', '' );
 		scanStep( freshScanTotals(), 0, 0 );
 	}
 
 	function scanStep( totals, dirIndex, fileOffset ) {
 		requestBatch( dirIndex, fileOffset ).then( function ( json ) {
 			if ( ! json.success ) {
-				handleRequestFailure( json );
-				els.scanBtn.disabled = false; // let them retry a failed scan.
+				handleRequestFailure( els.statusLog, json );
+				scanRunning = false;
+				updateActionButtons(); // let them retry a failed scan.
 				return;
 			}
 
@@ -195,17 +349,9 @@
 			}
 
 			var pct = data.total_dirs ? Math.min( 100, Math.round( ( data.dir_index / data.total_dirs ) * 100 ) ) : 100;
-			els.progressFill.style.width = pct + '%';
-			els.progressLabel.textContent = pct + '% (' + data.dir_index + ' / ' + data.total_dirs + ' ' + wwgAdmin.strings.folders + ')';
-
-			if ( data.done ) {
-				els.log.textContent = '';
-			} else {
-				var label = data.dir ? data.dir : wwgAdmin.strings.uploadsRoot;
-				els.log.textContent = wwgAdmin.strings.checking.replace( '%s', label );
-			}
-
-			els.summary.textContent = wwgAdmin.strings.scannedSoFar.replace( '%d', totals.scanned );
+			var label = pct + '% (' + data.dir_index + ' / ' + data.total_dirs + ' ' + wwgAdmin.strings.folders + ')';
+			var currentDirLog = data.done ? '' : wwgAdmin.strings.checking.replace( '%s', data.dir ? data.dir : wwgAdmin.strings.uploadsRoot );
+			renderStatusScanning( pct, label, currentDirLog );
 
 			if ( data.done ) {
 				scanRunning = false;
@@ -215,78 +361,71 @@
 
 			scanStep( totals, data.dir_index, data.file_offset );
 		} ).catch( function ( err ) {
-			handleNetworkFailure( err );
-			els.scanBtn.disabled = false;
+			handleNetworkFailure( els.statusLog, err );
+			scanRunning = false;
+			updateActionButtons();
 		} );
 	}
 
 	function finishScan( totals ) {
-		if ( totals.missing === 0 ) {
-			els.summary.textContent = wwgAdmin.strings.missingNone;
-			els.generateBtn.disabled = true;
-		} else {
-			var template = totals.missing === 1 ? wwgAdmin.strings.missingSingular : wwgAdmin.strings.missingPlural;
-			var summary = template
-				.replace( '%1$d', totals.missing )
-				.replace( '%2$s', formatBytes( totals.originalBytes ) );
-			// Some of the "missing" count above may be files already known
-			// to fail permanently (an earlier Generate run found this out
-			// and remembered it) -- called out as an explicit *subset* of
-			// that count ("Of these, N…"), not a second, seemingly separate
-			// number the way reusing failedSummary's "N failed" would read
-			// (that string also describes an attempt that just happened,
-			// which isn't true here -- Scan never attempts a conversion).
-			if ( totals.failures.length ) {
-				var knownFailuresTemplate = totals.failures.length === 1
-					? wwgAdmin.strings.missingKnownFailuresSingular
-					: wwgAdmin.strings.missingKnownFailuresPlural;
-				summary += ' ' + knownFailuresTemplate.replace( '%d', totals.failures.length );
-			}
-			els.summary.textContent = summary;
-			els.generateBtn.disabled = els.panel.getAttribute( 'data-webp-supported' ) !== '1';
-			scanMissingCount = totals.missing;
-		}
+		// Render immediately from the totals this run just measured --
+		// no need to wait on the save round-trip to show the admin their
+		// answer -- then reconcile scanState with whatever the server
+		// actually persisted (its clock is authoritative for "As of…").
+		var optimistic = {
+			missing: totals.missing,
+			original_bytes: totals.originalBytes,
+			failures: totals.failures,
+			finished_at: Math.floor( Date.now() / 1000 ),
+			invalidated_at: null,
+		};
+		scanState = optimistic;
+		renderStatusDone();
 
-		if ( totals.failures.length ) {
-			renderFailuresList( totals.failures );
-		}
-		// "Scan" stays disabled -- one scan per page load, by design;
-		// reload the page for a fresh count.
+		requestSaveScanResult( totals ).then( function ( json ) {
+			if ( json.success ) {
+				scanState = json.data;
+				renderStatusDone();
+			}
+			// A failed save just means this exact result won't survive a
+			// reload -- Scan itself still did its job, and the optimistic
+			// render above already reflects the accurate answer for this
+			// pageview, so there's nothing more to recover from here.
+		} );
 	}
 
-	// ---- Generate: drives a background job while this tab is open ----
+	// ---- Region 3: Generate Results ----
 
 	function onGenerateClick() {
-		if ( jobState.status === 'running' ) {
+		if ( 'running' === jobState.status ) {
 			return;
 		}
-		var resuming = jobState.status === 'paused';
+		var resuming = 'paused' === jobState.status;
 		if ( resuming || window.confirm( wwgAdmin.strings.confirmGenerate ) ) {
 			startGenerateJob();
 		}
 	}
 
 	function startGenerateJob() {
-		els.generateBtn.disabled = true;
-		els.cancelBtn.disabled = false;
-		els.log.textContent = '';
-		els.progress.hidden = false;
+		startingJob = true;
+		updateActionButtons(); // disables Generate immediately -- before the round-trip, not after.
 
-		requestJobAction( wwgAdmin.jobActions.start, { total_missing: scanMissingCount } ).then( function ( json ) {
+		requestJobAction( wwgAdmin.jobActions.start, { total_missing: scanState.missing } ).then( function ( json ) {
+			startingJob = false;
 			if ( ! json.success ) {
-				handleRequestFailure( json );
-				els.generateBtn.disabled = false;
-				els.cancelBtn.disabled = true;
+				handleRequestFailure( els.log, json );
+				updateActionButtons();
 				return;
 			}
 
 			jobState = json.data;
-			renderJobState();
+			showResultsBox();
+			renderResultsRunning();
 			startDriving();
 		} ).catch( function ( err ) {
-			handleNetworkFailure( err );
-			els.generateBtn.disabled = false;
-			els.cancelBtn.disabled = true;
+			startingJob = false;
+			handleNetworkFailure( els.log, err );
+			updateActionButtons();
 		} );
 	}
 
@@ -313,7 +452,7 @@
 				return; // stopDriving() ran while this request was in flight.
 			}
 			if ( ! json.success ) {
-				handleRequestFailure( json );
+				handleRequestFailure( els.log, json );
 				driving = false;
 				return;
 			}
@@ -331,95 +470,71 @@
 			}
 
 			driveRetryDelay = 400;
-			renderJobState();
 
 			if ( 'advanced' === outcome ) {
+				renderResultsRunning();
 				driveOnce();
 			} else if ( 'done' === outcome ) {
 				driving = false;
-				renderDoneUI();
+				renderResultsDone();
 			} else {
 				// 'stopped' -- the state changed out from under this loop
 				// (e.g. cancelled from another tab); render whatever it
 				// actually is now rather than assuming.
 				driving = false;
-				if ( jobState.status === 'paused' ) {
-					renderPausedUI();
-				} else if ( jobState.status === 'done' ) {
-					renderDoneUI();
+				if ( 'paused' === jobState.status ) {
+					renderResultsPaused();
+				} else if ( 'done' === jobState.status ) {
+					renderResultsDone();
 				}
 			}
 		} ).catch( function ( err ) {
 			if ( ! driving ) {
 				return;
 			}
-			handleNetworkFailure( err );
+			handleNetworkFailure( els.log, err );
 			driving = false;
 		} );
 	}
 
-	function updateGenerateProgressBar() {
+	function showResultsBox() {
+		els.resultsBox.hidden = false;
+	}
+
+	// Fills in everything renderResultsRunning()/Paused()/Done() share:
+	// the progress bar, the summary sentence, the stats grid, and the
+	// failures/recoveries lists. Each caller sets the dot/chip and log
+	// line itself, since those are the only parts that actually differ
+	// between running/paused/done.
+	function renderResultsCommon() {
 		var target = jobState.total_missing;
 		var processed = Math.min( jobState.stats.converted + jobState.stats.failed, target || 0 );
 		var pct = target ? Math.min( 100, Math.round( ( processed / target ) * 100 ) ) : 100;
+		els.progress.hidden = false;
 		els.progressFill.style.width = pct + '%';
 		els.progressLabel.textContent = pct + '% (' + processed + ' / ' + target + ' ' + wwgAdmin.strings.images + ')';
-	}
-
-	// Shared by both Generate's per-poll render (below) and Scan's
-	// end-of-run summary (finishScan()) -- a known failure reads the same
-	// whichever tool surfaced it.
-	function renderFailuresList( failures ) {
-		if ( ! failures.length ) {
-			return;
-		}
-		els.failures.hidden = false;
-		els.failuresCount.textContent = failures.length;
-
-		// Keep the DOM light on a run with hundreds of failures -- the
-		// count above already reflects the true total, this list is for
-		// spot-checking specific files, not an exhaustive report.
-		var toShow = failures.slice( -50 );
-		els.failuresList.innerHTML = '';
-		toShow.forEach( function ( failure ) {
-			var li = document.createElement( 'li' );
-			li.textContent = failure.file + ': ' + failure.error;
-			els.failuresList.appendChild( li );
-		} );
-	}
-
-	function renderFailures() {
-		renderFailuresList( jobState.stats.failures );
-	}
-
-	function renderRecoveries() {
-		var recoveries = jobState.stats.recoveries;
-		if ( ! recoveries.length ) {
-			return;
-		}
-		els.recoveries.hidden = false;
-		els.recoveriesCount.textContent = recoveries.length;
-
-		// Same "spot-check, not exhaustive report" reasoning as
-		// renderFailures() above.
-		var toShow = recoveries.slice( -50 );
-		els.recoveriesList.innerHTML = '';
-		toShow.forEach( function ( recovery ) {
-			var li = document.createElement( 'li' );
-			li.textContent = recovery.file;
-			els.recoveriesList.appendChild( li );
-		} );
-	}
-
-	function renderJobState() {
-		updateGenerateProgressBar();
-		renderFailures();
-		renderRecoveries();
 
 		els.convertResults.hidden = false;
 		document.getElementById( 'wwg-c-failed' ).textContent = jobState.stats.failed;
 		document.getElementById( 'wwg-c-bytes' ).textContent =
 			formatBytes( jobState.stats.webp_bytes ) + ' ' + wwgAdmin.strings.vsOriginal + ' ' + formatBytes( jobState.stats.original_bytes );
+
+		renderFailuresInto( els.failuresList, els.failuresCount, els.failures, jobState.stats.failures );
+
+		var recoveries = jobState.stats.recoveries;
+		if ( recoveries.length ) {
+			els.recoveries.hidden = false;
+			els.recoveriesCount.textContent = recoveries.length;
+			var toShow = recoveries.slice( -50 );
+			els.recoveriesList.innerHTML = '';
+			toShow.forEach( function ( recovery ) {
+				var li = document.createElement( 'li' );
+				li.textContent = recovery.file;
+				els.recoveriesList.appendChild( li );
+			} );
+		} else {
+			els.recoveries.hidden = true;
+		}
 
 		// Once every missing image Scan found has been processed,
 		// converted/failed/bytes are final for this run, whether it's
@@ -430,139 +545,136 @@
 		// (an earlier version of this was, which is exactly why Cancel
 		// mid-way-through-the-bookkeeping-phase still showed "so far"
 		// while paused: the running-only gate went false right as
-		// renderPausedUI() called this, even though the numbers were
-		// already final by then).
+		// renderResultsPaused() called this, even though the numbers
+		// were already final by then).
 		var doneWithRealWork = jobState.total_missing > 0
 			&& ( jobState.stats.converted + jobState.stats.failed ) >= jobState.total_missing;
 
 		if ( doneWithRealWork ) {
 			els.summary.textContent = wwgAdmin.strings.generatedFinal.replace( '%d', jobState.stats.converted )
-				+ ( jobState.stats.failed > 0 ? ' ' + wwgAdmin.strings.failedSummary.replace( '%d', jobState.stats.failed ) : '' );
+				+ ( jobState.stats.failed > 0 ? ' ' + wwgAdmin.strings.failedSummary.replace( '%d', jobState.stats.failed ) : '' )
+				+ ( jobState.cache_cleared ? ' ' + wwgAdmin.strings.cacheClearedPast : '' );
 		} else {
 			els.summary.textContent = wwgAdmin.strings.generatedSoFar.replace( '%d', jobState.stats.converted );
 		}
 
-		if ( jobState.status === 'running' && jobState.current_dir ) {
+		return doneWithRealWork;
+	}
+
+	function renderResultsRunning() {
+		els.resultsBox.classList.remove( 'wwg-results-box--done' );
+		setStatusDot( els.resultsDot, 'live' );
+		setChipLabel( els.resultsChipLabel, 'live', wwgAdmin.strings.generatingLabel );
+
+		var doneWithRealWork = renderResultsCommon();
+
+		if ( jobState.current_dir ) {
+			els.log.hidden = false;
 			var template = doneWithRealWork ? wwgAdmin.strings.stillScanning : wwgAdmin.strings.converting;
 			els.log.textContent = template.replace( '%s', jobState.current_dir );
+		} else {
+			els.log.hidden = true;
 		}
+
+		updateActionButtons();
 	}
 
-	function renderPausedUI() {
+	function renderResultsPaused() {
 		stopDriving();
-		els.generateBtn.disabled = false;
-		els.cancelBtn.disabled = true;
+		els.resultsBox.classList.remove( 'wwg-results-box--done' );
+		setStatusDot( els.resultsDot, 'paused' );
+		setChipLabel( els.resultsChipLabel, 'paused', wwgAdmin.strings.pausedLabel );
+
+		renderResultsCommon();
+		els.log.hidden = false;
 		els.log.textContent = wwgAdmin.strings.paused;
-		renderJobState();
 		// Progress bar / summary are left exactly where they were --
 		// paused, not reset or hidden.
+
+		updateActionButtons();
 	}
 
-	function renderDoneUI() {
+	function renderResultsDone() {
 		stopDriving();
 		// Scan deliberately stays enabled here (unlike Generate/Cancel,
-		// which have nothing left to do) -- before jobState was persisted
-		// server-side, "reload the page for a fresh count" was a real
-		// escape hatch back to a blank slate; now a reload just hydrates
-		// straight back into this same done state, so without this, a
-		// finished run left Scan permanently unclickable with no way to
-		// check the library again short of clearing server state by hand.
-		els.generateBtn.disabled = true;
-		els.cancelBtn.disabled = true;
-		els.progress.hidden = false;
-		renderJobState(); // sets els.summary to the "N generated. M failed…" tally already.
+		// which have nothing left to do): it always has been re-clickable
+		// any time now (see updateActionButtons()), and a completed
+		// Generate run is exactly when someone's most likely to want a
+		// fresh Library Status check.
+		els.resultsBox.classList.add( 'wwg-results-box--done' );
+		setStatusDot( els.resultsDot, 'done' );
+		setChipLabel( els.resultsChipLabel, 'done', wwgAdmin.strings.lastRunLabel.replace( '%s', formatDateTime( jobState.finished_at ) ) );
 
-		// renderDoneUI() is the only place status is truly, finally
-		// 'done' -- renderJobState() alone can't tell that apart from
-		// "still running, but finished the real work and just walking the
-		// rest of the folder tree" or "paused after finishing the real
-		// work," neither of which is actually over yet. This can be
-		// reached both right as a job finishes live *and* on a plain page
-		// load days or weeks later (the state is persisted server-side) --
-		// prefixing/suffixing with an explicit timestamp here, rather than
-		// baking "just happened"-sounding language into the tally itself,
-		// is what makes it read correctly in both cases: "Last run (Aug
-		// 10, 2026, 5:46 PM): 3 generated. 1 failed…" is accurate whether
-		// that's ten seconds old or three weeks old.
-		if ( jobState.finished_at ) {
-			els.summary.textContent = wwgAdmin.strings.lastRunPrefix.replace( '%s', formatDateTime( jobState.finished_at ) )
-				+ ' ' + els.summary.textContent
-				+ ( jobState.cache_cleared ? ' ' + wwgAdmin.strings.cacheClearedPast : '' );
-		}
+		renderResultsCommon(); // sets els.summary to the final "N generated. M failed…" tally, cache-cleared note included.
 
-		// Deliberately short and un-timestamped, unlike the summary above
-		// -- "done" is a fact about the job's current status, still true
-		// no matter how long ago it became true, not a point-in-time
-		// event that needs dating.
-		els.log.textContent = wwgAdmin.strings.doneLabel;
+		// Nothing left to say here that the chip label and summary above
+		// don't already cover -- deliberately empty rather than a "Done."
+		// line that would need its own un-timestamped/timestamped split
+		// the way the chip already handles for free.
+		els.log.hidden = true;
+		els.log.textContent = '';
+
+		updateActionButtons();
 	}
 
 	function requestCancel() {
-		if ( jobState.status !== 'running' ) {
+		if ( 'running' !== jobState.status ) {
 			return;
 		}
 		// Stop the tight drive loop the instant Cancel is clicked, rather
-		// than waiting on this round-trip -- renderPausedUI() also calls
-		// stopDriving(), but not until the response below lands.
+		// than waiting on this round-trip -- renderResultsPaused() also
+		// calls stopDriving(), but not until the response below lands.
 		stopDriving();
 		// Prevent repeat clicks while the in-flight request finishes.
 		els.cancelBtn.disabled = true;
 
 		requestJobAction( wwgAdmin.jobActions.cancel ).then( function ( json ) {
 			if ( ! json.success ) {
-				handleRequestFailure( json );
+				handleRequestFailure( els.log, json );
 				els.cancelBtn.disabled = false;
 				return;
 			}
 
 			jobState = json.data;
-			renderPausedUI();
+			renderResultsPaused();
 		} ).catch( function ( err ) {
-			handleNetworkFailure( err );
+			handleNetworkFailure( els.log, err );
 			els.cancelBtn.disabled = false;
 		} );
 	}
 
 	/**
-	 * Called once on page load -- makes the panel reflect whatever the
-	 * background job's actual state is, instead of always booting to a
-	 * blank "click Generate" screen. This is what lets a mid-run reload,
-	 * or coming back after the job finished elsewhere, show up correctly
+	 * Called once on page load -- makes both regions reflect whatever's
+	 * actually true server-side, instead of always booting to a blank
+	 * screen. This is what lets a mid-run reload, or coming back after
+	 * the job finished (or a scan completed) elsewhere, show up correctly
 	 * with no click required.
 	 */
-	function bootGenerate() {
-		if ( jobState.status === 'running' ) {
-			// Disabled here to match what's already true within a single
-			// pageview: runScan() disables Scan the moment it's clicked
-			// and nothing re-enables it while Generate is going, so
-			// clicking Scan mid-run was never actually reachable that
-			// way. Landing on the page fresh mid-run (a reload, or
-			// coming back later) skipped that guard entirely, though --
-			// without this, Scan stayed clickable, and clicking it would
-			// visually disable Cancel (runScan() does that unconditionally)
-			// without actually stopping the drive loop, leaving no way to
-			// cancel except reloading again.
-			els.scanBtn.disabled = true;
-			els.generateBtn.disabled = true;
-			els.cancelBtn.disabled = false;
-			els.progress.hidden = false;
-			renderJobState();
+	function boot() {
+		renderStatusFromState();
+
+		if ( 'running' === jobState.status ) {
+			showResultsBox();
+			renderResultsRunning();
 			startDriving();
-		} else if ( jobState.status === 'paused' ) {
-			els.progress.hidden = false;
-			renderPausedUI();
-		} else if ( jobState.status === 'done' ) {
-			renderDoneUI();
+		} else if ( 'paused' === jobState.status ) {
+			showResultsBox();
+			renderResultsPaused();
+		} else if ( 'done' === jobState.status ) {
+			showResultsBox();
+			renderResultsDone();
 		}
-		// 'idle': today's default boot state -- Generate stays disabled
-		// until Scan finishes (see finishScan()).
+		// 'idle': Generate Results box stays absent -- nothing has ever
+		// run yet, so there's no history to show.
 	}
 
-	function handleRequestFailure( json ) {
-		els.log.textContent = wwgAdmin.strings.error + ' ' + ( ( json.data && json.data.message ) || '' );
+	function handleRequestFailure( logEl, json ) {
+		logEl.hidden = false;
+		logEl.textContent = wwgAdmin.strings.error + ' ' + ( ( json.data && json.data.message ) || '' );
 	}
 
-	function handleNetworkFailure( err ) {
-		els.log.textContent = wwgAdmin.strings.error + ' ' + err;
+	function handleNetworkFailure( logEl, err ) {
+		logEl.hidden = false;
+		logEl.textContent = wwgAdmin.strings.error + ' ' + err;
 	}
 } )();

@@ -15,9 +15,9 @@
  * plugin, so the option/transient/cron-hook keys below are hardcoded
  * rather than referencing the classes' own constants -- keep them in
  * sync with WWG_Generator::OPTION_QUALITY (includes/class-wwg-generator.php),
- * WWG_Admin::OPTION_CLEAN_DIRS, WWG_Admin::OPTION_KNOWN_FAILURES, and the
- * transient/cron-hook keys used in includes/class-wwg-admin.php and
- * includes/class-wwg-job.php.
+ * WWG_Admin::OPTION_CLEAN_DIRS, WWG_Admin::OPTION_KNOWN_FAILURES,
+ * WWG_Admin::OPTION_SCAN_STATE, and the transient/cron-hook keys used in
+ * includes/class-wwg-admin.php and includes/class-wwg-job.php.
  *
  * @package WWG
  */
@@ -31,6 +31,7 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 delete_option( 'wwg_quality' );
 delete_option( 'wwg_clean_dirs' );
 delete_option( 'wwg_known_failures' );
+delete_option( 'wwg_scan_state' );
 delete_transient( 'wwg_scan_dirs' );
 delete_transient( 'wwg_convert_run_tally' ); // Stale key from before the Generate job moved to WP-Cron -- kept here for anyone upgrading from that version.
 delete_transient( 'wwg_job_state' );
@@ -47,6 +48,7 @@ if ( is_multisite() ) {
 		delete_option( 'wwg_quality' );
 		delete_option( 'wwg_clean_dirs' );
 		delete_option( 'wwg_known_failures' );
+		delete_option( 'wwg_scan_state' );
 		delete_transient( 'wwg_scan_dirs' );
 		delete_transient( 'wwg_convert_run_tally' );
 		delete_transient( 'wwg_job_state' );

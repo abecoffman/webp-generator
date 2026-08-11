@@ -86,9 +86,10 @@ class WWG_Job {
 	private $admin;
 
 	/**
-	 * @param WWG_Admin $admin Supplies run_job_batch() during cron ticks
-	 *                         and get_strings() for the notice/heartbeat
-	 *                         copy.
+	 * @param WWG_Admin $admin Supplies run_job_batch() during cron ticks,
+	 *                         get_strings() for the notice/heartbeat copy,
+	 *                         and mark_scan_state_stale() when a batch
+	 *                         actually converts something.
 	 */
 	public function __construct( WWG_Admin $admin ) {
 		$this->admin = $admin;
@@ -273,6 +274,12 @@ class WWG_Job {
 			if ( $state['stats']['converted'] > 0 ) {
 				WWG_Cache::clear_all();
 				$state['cache_cleared'] = true;
+				// The library just changed -- Scan's last "Library Status"
+				// snapshot (see WWG_Admin::OPTION_SCAN_STATE) is now
+				// provably out of date, so mark it stale right at the exact
+				// moment that becomes true rather than leaving it to
+				// silently lie until an arbitrary TTL expires.
+				$this->admin->mark_scan_state_stale();
 			}
 
 			$this->write_state( $state );

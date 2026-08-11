@@ -41,6 +41,11 @@ test.describe('WebP Generator admin screen', () => {
 			page.getByText(/already has a \.webp version|image is missing a \.webp version|images are missing a \.webp version/i)
 		).toBeVisible({ timeout: 30000 });
 
+		// Scan is no longer disabled after one run per page load -- its
+		// result now persists server-side (the "Library Status" region),
+		// so re-checking any time is safe and expected to work.
+		await expect(scanButton).toBeEnabled();
+
 		// A bare sandbox library has nothing to convert, so Generate may
 		// correctly stay disabled -- the real assertion is that Scan
 		// finished cleanly and reported a real, well-formed result.

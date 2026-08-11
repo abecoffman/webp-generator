@@ -64,6 +64,42 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 		</div>
 
 		<div class="wwg-panel" data-webp-supported="<?php echo $webp_ok ? '1' : '0'; ?>">
+
+			<!-- Region 1: Library Status -- known current state, always
+				present (even before any scan has ever run). Rendered
+				entirely by admin.js from wwgAdmin.scanState, a snapshot
+				of Scan's last completed pass that survives a reload --
+				see WWG_Admin::OPTION_SCAN_STATE. -->
+			<div class="wwg-status-box" id="wwg-status-box">
+				<div class="wwg-status-header">
+					<span class="wwg-status-dot" id="wwg-status-dot"></span>
+					<span class="wwg-status-chip-label" id="wwg-status-chip-label"><?php esc_html_e( 'Library status', 'webp-generator' ); ?></span>
+				</div>
+
+				<div id="wwg-status-idle">
+					<p class="wwg-status-headline" id="wwg-status-headline"></p>
+					<p class="wwg-status-meta" id="wwg-status-meta"></p>
+				</div>
+
+				<div id="wwg-status-progress" class="wwg-progress" hidden>
+					<div class="wwg-progress-bar">
+						<div class="wwg-progress-bar-fill"></div>
+					</div>
+					<p class="wwg-progress-label"></p>
+				</div>
+				<p class="wwg-log" id="wwg-status-log" aria-live="polite" hidden></p>
+
+				<details class="wwg-failures" id="wwg-status-failures" hidden>
+					<summary>
+						<?php esc_html_e( 'Failed conversions', 'webp-generator' ); ?>
+						(<span id="wwg-status-failures-count">0</span>)
+					</summary>
+					<ul class="wwg-failures-list" id="wwg-status-failures-list"></ul>
+				</details>
+			</div>
+
+			<!-- Region 2: Actions -- available now. Never lives inside
+				either status box. -->
 			<div class="wwg-actions">
 				<button type="button" class="button button-primary" id="wwg-scan"<?php echo $webp_ok ? '' : ' disabled'; ?>>
 					<?php esc_html_e( 'Scan', 'webp-generator' ); ?>
@@ -76,44 +112,55 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 				</button>
 			</div>
 
-			<div id="wwg-progress" class="wwg-progress" hidden>
-				<div class="wwg-progress-bar">
-					<div class="wwg-progress-bar-fill"></div>
+			<!-- Region 3: Generate Results -- absent until Generate has
+				ever run (admin.js unhides it); live progress while
+				running/paused, settling into a dated "last run" record
+				once done (WWG_Job's persisted state, unchanged). -->
+			<div class="wwg-results-box" id="wwg-results-box" hidden>
+				<div class="wwg-results-header">
+					<span class="wwg-status-dot" id="wwg-results-dot"></span>
+					<span class="wwg-status-chip-label" id="wwg-results-chip-label"></span>
 				</div>
-				<p class="wwg-progress-label"></p>
+
+				<div id="wwg-progress" class="wwg-progress" hidden>
+					<div class="wwg-progress-bar">
+						<div class="wwg-progress-bar-fill"></div>
+					</div>
+					<p class="wwg-progress-label"></p>
+				</div>
+
+				<p id="wwg-summary" class="wwg-summary"></p>
+
+				<div class="wwg-stats" id="wwg-convert-results" hidden>
+					<div class="wwg-stat">
+						<span class="wwg-stat-value" id="wwg-c-failed">–</span>
+						<span class="wwg-stat-label"><?php esc_html_e( 'Failed', 'webp-generator' ); ?></span>
+					</div>
+					<div class="wwg-stat wwg-stat--wide">
+						<span class="wwg-stat-value" id="wwg-c-bytes">–</span>
+						<span class="wwg-stat-label"><?php esc_html_e( 'New size vs. originals', 'webp-generator' ); ?></span>
+					</div>
+				</div>
+
+				<details class="wwg-failures" id="wwg-failures" hidden>
+					<summary>
+						<?php esc_html_e( 'Failed conversions', 'webp-generator' ); ?>
+						(<span id="wwg-failures-count">0</span>)
+					</summary>
+					<ul class="wwg-failures-list" id="wwg-failures-list"></ul>
+				</details>
+
+				<details class="wwg-recoveries" id="wwg-recoveries" hidden>
+					<summary>
+						<?php esc_html_e( 'Recovered from embedded data', 'webp-generator' ); ?>
+						(<span id="wwg-recoveries-count">0</span>)
+					</summary>
+					<p class="wwg-recoveries-note"><?php esc_html_e( 'A .webp was created successfully for each file below, but the original itself still has stray bytes before the real image data starts -- worth a look (or re-exporting from the source) if you still have it.', 'webp-generator' ); ?></p>
+					<ul class="wwg-recoveries-list" id="wwg-recoveries-list"></ul>
+				</details>
+
+				<p class="wwg-log" id="wwg-log" aria-live="polite" hidden></p>
 			</div>
-
-			<p id="wwg-summary" class="wwg-summary"></p>
-
-			<div class="wwg-stats" id="wwg-convert-results" hidden>
-				<div class="wwg-stat">
-					<span class="wwg-stat-value" id="wwg-c-failed">–</span>
-					<span class="wwg-stat-label"><?php esc_html_e( 'Failed', 'webp-generator' ); ?></span>
-				</div>
-				<div class="wwg-stat wwg-stat--wide">
-					<span class="wwg-stat-value" id="wwg-c-bytes">–</span>
-					<span class="wwg-stat-label"><?php esc_html_e( 'New size vs. originals', 'webp-generator' ); ?></span>
-				</div>
-			</div>
-
-			<details class="wwg-failures" id="wwg-failures" hidden>
-				<summary>
-					<?php esc_html_e( 'Failed conversions', 'webp-generator' ); ?>
-					(<span id="wwg-failures-count">0</span>)
-				</summary>
-				<ul class="wwg-failures-list" id="wwg-failures-list"></ul>
-			</details>
-
-			<details class="wwg-recoveries" id="wwg-recoveries" hidden>
-				<summary>
-					<?php esc_html_e( 'Recovered from embedded data', 'webp-generator' ); ?>
-					(<span id="wwg-recoveries-count">0</span>)
-				</summary>
-				<p class="wwg-recoveries-note"><?php esc_html_e( 'A .webp was created successfully for each file below, but the original itself still has stray bytes before the real image data starts -- worth a look (or re-exporting from the source) if you still have it.', 'webp-generator' ); ?></p>
-				<ul class="wwg-recoveries-list" id="wwg-recoveries-list"></ul>
-			</details>
-
-			<p class="wwg-log" id="wwg-log" aria-live="polite"></p>
 		</div>
 	</div>
 

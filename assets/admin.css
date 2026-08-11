@@ -136,10 +136,121 @@ details summary {
 
 /* Generate WebP Images ---------------------------------------------- */
 
+/* Region 1 (Library Status) and Region 3 (Generate Results, once done)
+ * both use this same muted-box treatment -- it's the one visual signal
+ * for "settled/historical", the same #f6f7f7/#dcdcde tokens .wwg-code
+ * and the failures/recoveries lists already use elsewhere on this page.
+ * Region 3 stays on the plain white card background while actively
+ * running/paused (see .wwg-results-box below), so "live and unsettled"
+ * contrasts against "settled and historical" without needing a separate
+ * icon to explain it. Only the box-appearance properties are shared here
+ * -- margins differ by region/state, so each keeps its own rule below
+ * rather than fighting this one over them.
+ */
+.wwg-status-box,
+.wwg-results-box--done {
+	background: #f6f7f7;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	padding: 16px;
+}
+
+.wwg-status-box {
+	margin-bottom: 16px;
+}
+
+.wwg-status-header,
+.wwg-results-header {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	margin-bottom: 10px;
+}
+
+/* Semantic status color, deliberately reusing the same three colors the
+ * .htaccess syntax highlighting above already established for this page
+ * (blue=live, green=settled/good, amber=paused) rather than introducing
+ * a new accent -- kept separate from any "brand" color since this plugin
+ * doesn't have one.
+ */
+.wwg-status-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	flex: none;
+}
+
+.wwg-status-dot--idle {
+	background: #a7aaad;
+}
+
+.wwg-status-dot--live {
+	background: #2271b1;
+	box-shadow: 0 0 0 3px rgba(34, 113, 177, 0.15);
+}
+
+.wwg-status-dot--done {
+	background: #007017;
+}
+
+.wwg-status-dot--paused {
+	background: #ab5c00;
+}
+
+.wwg-status-chip-label {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: #8c8f94;
+}
+
+.wwg-status-chip-label--live {
+	color: #2271b1;
+}
+
+.wwg-status-chip-label--done {
+	color: #007017;
+}
+
+.wwg-status-chip-label--paused {
+	color: #ab5c00;
+}
+
+.wwg-status-headline {
+	font-size: 15px;
+	font-weight: 600;
+	line-height: 1.5;
+	margin: 0;
+}
+
+.wwg-status-meta {
+	font-size: 13px;
+	color: #646970;
+	margin: 4px 0 0;
+}
+
+/* Region 3 while running/paused -- a plain continuation of the card,
+ * deliberately NOT the muted box above (see the comment on
+ * .wwg-status-box/.wwg-results-box--done) -- only picks up that
+ * treatment once truly done.
+ */
+.wwg-results-box {
+	margin-top: 20px;
+	padding-top: 20px;
+	border-top: 1px solid #dcdcde;
+}
+
+.wwg-results-box--done {
+	margin-top: 20px;
+	margin-bottom: 0;
+	border-top: none;
+}
+
 .wwg-actions {
 	display: flex;
 	gap: 8px;
-	margin-bottom: 16px;
+	margin-bottom: 4px;
 }
 
 .wwg-progress {

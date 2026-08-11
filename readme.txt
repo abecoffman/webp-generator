@@ -4,7 +4,7 @@ Tags: webp, image optimization, performance, media, images
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.12.0
+Stable tag: 1.13.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -16,7 +16,7 @@ WebP Generator creates a `.webp` version of every image you upload — automatic
 
 For everything uploaded *before* that, **Tools → WebP Generator** adds a simple Scan / Generate / Cancel tool:
 
-* **Scan** reports how many images in your media library are missing a `.webp` version, and how much that adds up to, before anything is written.
+* **Scan** reports how many images in your media library are missing a `.webp` version, and how much that adds up to, before anything is written. The result sticks around ("Library status") — reload the page, come back tomorrow, it's still there, dated, and re-checking is one click any time.
 * **Generate** converts them in the background — it keeps running even if you close the browser tab, so a large library doesn't need to be babysat. Come back any time and the page picks up exactly where things stand: still running, paused, or finished, no need to click Generate again to see it. If you're elsewhere in wp-admin when it finishes, a notice and a Tools-menu badge let you know. It's resumable: batches are small and bounded so it can't time out on a large library, and if you click **Cancel**, it pauses exactly where it was — click Generate again any time to pick up from that point.
 
 = Serving the files =
@@ -76,6 +76,10 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 
 == Changelog ==
 
+= 1.13.0 =
+* Tools → WebP Generator has been reorganized around three clear questions instead of one line of text that got overwritten depending on which tool ran most recently: what's currently true about your library ("Library status"), what you can do right now (Scan/Generate/Cancel), and what a completed Generate run actually did, dated ("Last run"). Library status now persists across reloads the same way a completed Generate run already does, instead of resetting to blank every time -- Scan is no longer limited to once per page load, and Generate can tell right away whether there's anything to do without needing a fresh Scan first.
+* If a Generate run changes the library, the last Scan result is marked stale immediately (not just eventually) and says so plainly, rather than silently showing an outdated count.
+
 = 1.12.0 =
 * A file that fails to convert once and hasn't changed since is no longer re-attempted on every later Scan/Generate run -- it's still reported every time (so it doesn't silently disappear from view), but without repeating the expensive, doomed decode attempt. Once a failure has held steady across a run, the folder it's in can also join the "already verified" cache from 1.11.0 -- a folder isn't kept out of that cache forever just because one file in it will never convert. Automatically re-attempts for real the moment the file actually changes, even for a folder that's already cached this way.
 * A completely empty (0-byte) source file -- typically an interrupted upload or thumbnail generation -- now gets a distinct, actionable message instead of a generic decode-failure error.
@@ -101,6 +105,9 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 * Initial release.
 
 == Upgrade Notice ==
+
+= 1.13.0 =
+Tools → WebP Generator is reorganized around what's currently true, what you can do, and what a completed run actually did -- Library status now persists across reloads and Scan is no longer limited to once per page load.
 
 = 1.12.0 =
 Files that permanently fail conversion are no longer re-attempted every run, empty files get a clearer message, and the tool now tries to recover a usable image from files with valid data buried after stray bytes.

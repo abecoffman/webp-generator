@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WebP Generator
  * Description: Generates a .webp sibling for every size of newly uploaded JPEG/PNG images, and can install the Apache .htaccess rule that serves them to browsers that support it (falls back to a manual example for other servers). Also adds a Tools > WebP Generator admin screen to scan the existing media library for images still missing a .webp version and convert them on demand, and clears common page caches (Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, LiteSpeed Cache) when it generates new files.
- * Version:     1.12.0
+ * Version:     1.13.0
  * Author:      Abe Coffman
  * License:     GPL-2.0-or-later
  * Text Domain: webp-generator
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WWG_VERSION', '1.12.0' );
+define( 'WWG_VERSION', '1.13.0' );
 define( 'WWG_PATH', plugin_dir_path( __FILE__ ) );
 define( 'WWG_FILE', __FILE__ );
 

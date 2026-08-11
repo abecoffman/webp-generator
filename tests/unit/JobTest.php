@@ -123,6 +123,16 @@ class JobTest extends TestCase {
 	private $transients;
 
 	/**
+	 * Fake backing store for get_option()/update_option() -- only needed
+	 * because process_one_batch()'s done branch now calls
+	 * WWG_Admin::mark_scan_state_stale() whenever a batch converts
+	 * anything, which reads/writes wwg_scan_state like any other option.
+	 *
+	 * @var array
+	 */
+	private $options;
+
+	/**
 	 * Captured argument of the most recent wp_send_json_success() call --
 	 * standing in for the JSON response an AJAX handler would have sent.
 	 *
@@ -144,6 +154,7 @@ class JobTest extends TestCase {
 		parent::set_up();
 
 		$this->transients            = array();
+		$this->options               = array();
 		$this->last_json              = null;
 		$this->schedule_single_calls = 0;
 		$this->clear_scheduled_calls = 0;
@@ -162,6 +173,17 @@ class JobTest extends TestCase {
 		Functions\when( 'delete_transient' )->alias(
 			function ( $key ) {
 				unset( $this->transients[ $key ] );
+				return true;
+			}
+		);
+		Functions\when( 'get_option' )->alias(
+			function ( $key, $default = false ) {
+				return isset( $this->options[ $key ] ) ? $this->options[ $key ] : $default;
+			}
+		);
+		Functions\when( 'update_option' )->alias(
+			function ( $key, $value ) {
+				$this->options[ $key ] = $value;
 				return true;
 			}
 		);

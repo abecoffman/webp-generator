@@ -17,12 +17,13 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class WWG_Admin {
 
-	const AJAX_ACTION    = 'wwg_process_batch';
-	const NONCE_ACTION   = 'wwg_admin';
-	const SETTINGS_NONCE = 'wwg_settings';
-	const HTACCESS_NONCE = 'wwg_htaccess';
-	const CAPABILITY     = 'manage_options';
-	const PAGE_SLUG      = 'webp-generator';
+	const AJAX_ACTION      = 'wwg_process_batch';
+	const ACTION_SAVE_SCAN = 'wwg_save_scan_result';
+	const NONCE_ACTION     = 'wwg_admin';
+	const SETTINGS_NONCE   = 'wwg_settings';
+	const HTACCESS_NONCE   = 'wwg_htaccess';
+	const CAPABILITY       = 'manage_options';
+	const PAGE_SLUG        = 'webp-generator';
 
 	/**
 	 * How many files list_images_in_dir() results process_batch() looks
@@ -108,6 +109,30 @@ class WWG_Admin {
 	const OPTION_KNOWN_FAILURES = 'wwg_known_failures';
 
 	/**
+	 * Option holding a snapshot of Scan's last completed pass -- what the
+	 * Tools > WebP Generator page's "Library Status" region renders,
+	 * including on a plain page load, the same way WWG_Job's own
+	 * persisted state already lets Generate's results survive a reload.
+	 * Deliberately lighter than WWG_Job's state: Scan has no cron leg and
+	 * is now fast enough (thanks to OPTION_CLEAN_DIRS/OPTION_KNOWN_FAILURES)
+	 * that a resumable in-progress state isn't needed -- this only ever
+	 * holds the result of a scan that actually finished.
+	 *
+	 * Shape: {missing, original_bytes, failures[], finished_at,
+	 * invalidated_at}. Self-invalidates on the specific event that makes
+	 * it wrong (a Generate run that actually converts something -- see
+	 * mark_scan_state_stale(), called from WWG_Job) rather than a bare
+	 * TTL, so it never silently goes stale while still claiming to be
+	 * current; invalidation keeps the old numbers rather than deleting
+	 * them, so the UI can explain *why* it reset instead of showing a
+	 * generic first-run message. autoload=false, same reasoning as
+	 * OPTION_CLEAN_DIRS.
+	 *
+	 * @var string
+	 */
+	const OPTION_SCAN_STATE = 'wwg_scan_state';
+
+	/**
 	 * @var WWG_Generator
 	 */
 	private $generator;
@@ -144,6 +169,7 @@ class WWG_Admin {
 		add_action( 'admin_menu', array( $this, 'register_page' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
 		add_action( 'wp_ajax_' . self::AJAX_ACTION, array( $this, 'handle_ajax' ) );
+		add_action( 'wp_ajax_' . self::ACTION_SAVE_SCAN, array( $this, 'handle_save_scan_result' ) );
 		add_action( 'admin_init', array( $this, 'maybe_save_settings' ) );
 		add_action( 'admin_init', array( $this, 'maybe_handle_htaccess_action' ) );
 	}
@@ -256,17 +282,19 @@ class WWG_Admin {
 			'wwg-admin',
 			'wwgAdmin',
 			array(
-				'ajaxUrl'    => admin_url( 'admin-ajax.php' ),
-				'action'     => self::AJAX_ACTION,
-				'nonce'      => wp_create_nonce( self::NONCE_ACTION ),
-				'jobState'   => $this->job->get_hydrated_state(),
-				'jobActions' => array(
+				'ajaxUrl'        => admin_url( 'admin-ajax.php' ),
+				'action'         => self::AJAX_ACTION,
+				'scanSaveAction' => self::ACTION_SAVE_SCAN,
+				'nonce'          => wp_create_nonce( self::NONCE_ACTION ),
+				'jobState'       => $this->job->get_hydrated_state(),
+				'scanState'      => $this->get_scan_state(),
+				'jobActions'     => array(
 					'start'  => WWG_Job::ACTION_START,
 					'status' => WWG_Job::ACTION_STATUS,
 					'cancel' => WWG_Job::ACTION_CANCEL,
 					'drive'  => WWG_Job::ACTION_DRIVE,
 				),
-				'strings'    => self::get_strings(),
+				'strings'        => self::get_strings(),
 			)
 		);
 	}
@@ -283,6 +311,27 @@ class WWG_Admin {
 	public static function get_strings() {
 		return array(
 			'confirmGenerate'              => __( 'Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'webp-generator' ),
+			// Static label for Region 1's status chip in its idle/done
+			// substates -- while actively scanning, admin.js swaps the
+			// chip to scanningLabel below instead.
+			'libraryStatusLabel'           => __( 'Library status', 'webp-generator' ),
+			'scanningLabel'                => __( 'Scanning…', 'webp-generator' ),
+			'generatingLabel'              => __( 'Generating…', 'webp-generator' ),
+			'pausedLabel'                  => __( 'Paused', 'webp-generator' ),
+			/* translators: %s: date and time the run finished, e.g. "Aug 10, 2026, 5:46 PM" -- formatted client-side in the visitor's own locale/timezone. Region 3's status chip once a Generate run is done. */
+			'lastRunLabel'                 => __( 'Last run — %s', 'webp-generator' ),
+			// Region 1's headline before any scan has ever completed, or
+			// once a completed scan has been invalidated back to unknown
+			// (see 'notCheckedYetFirstTime'/'notCheckedYetInvalidated' for
+			// which meta line pairs with this).
+			'notCheckedYet'                => __( 'Not checked yet.', 'webp-generator' ),
+			'notCheckedYetFirstTime'       => __( 'Click Scan to see how many images need a .webp version.', 'webp-generator' ),
+			// Shown instead of the above once a Generate run has actually
+			// changed the library since the last scan (see
+			// WWG_Admin::mark_scan_state_stale(), called from WWG_Job) --
+			// explains *why* Library Status reset instead of leaving the
+			// admin to wonder if a scan they remember running got lost.
+			'notCheckedYetInvalidated'     => __( 'You generated images since the last check -- click Scan to see what’s left.', 'webp-generator' ),
 			/* translators: %s: folder path currently being scanned, e.g. "2024/03". Substituted client-side in admin.js. */
 			'checking'                     => __( 'Checking %s…', 'webp-generator' ),
 			/* translators: %s: folder path currently being processed, e.g. "2024/03". Substituted client-side in admin.js. */
@@ -290,13 +339,11 @@ class WWG_Admin {
 			/* translators: %s: folder path currently being walked, e.g. "2024/03". Substituted client-side in admin.js. Shown once every missing image Scan found has already been processed -- the run keeps walking the rest of the library to catch anything Scan might have missed, but isn't converting anything new, so this deliberately doesn't say "Generating" like the string above. */
 			'stillScanning'                => __( 'All missing images found -- finishing folder scan (%s)…', 'webp-generator' ),
 			'uploadsRoot'                  => __( 'the uploads folder', 'webp-generator' ),
-			/* translators: %d: number of images scanned so far. */
-			'scannedSoFar'                 => __( '%d images scanned so far…', 'webp-generator' ),
 			/* translators: %d: number of images generated so far. */
 			'generatedSoFar'               => __( '%d images generated so far…', 'webp-generator' ),
 			/* translators: %d: number of images generated. Shown once every missing image Scan found has been processed -- unlike 'generatedSoFar' above, this is the final count for this run (only the "finishing folder scan" walk is left, which won't change it further), so it deliberately doesn't say "so far". */
 			'generatedFinal'               => __( '%d image(s) generated.', 'webp-generator' ),
-			'missingNone'                  => __( 'Every image already has a .webp version. Nothing to generate.', 'webp-generator' ),
+			'missingNone'                  => __( 'Every image already has a .webp version.', 'webp-generator' ),
 			/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB". */
 			'missingPlural'                => __( '%1$d images are missing a .webp version (%2$s).', 'webp-generator' ),
 			/* translators: 1: combined file size, e.g. "420 KB". */
@@ -318,15 +365,14 @@ class WWG_Admin {
 			// Used instead of the above when that count is exactly 1 -- its
 			// own string (not a %d substitution) to avoid "Of these, 1 are…".
 			'missingKnownFailuresSingular' => __( 'Of these, 1 is already known to permanently fail -- see "Failed conversions" for details.', 'webp-generator' ),
+			/* translators: %s: date and time Scan's last completed pass finished, e.g. "Aug 10, 2026, 5:46 PM" -- formatted client-side. Region 1's meta line once a valid scan result exists. */
+			'asOf'                         => __( 'As of %s.', 'webp-generator' ),
 			// Full "Done -- generated N, M failed" phrasing for contexts
 			// with no other supporting UI around them -- the completion
 			// notice (WWG_Job::maybe_render_notice()) and the Heartbeat
-			// live-update (admin-heartbeat.js). The tool page itself
-			// does NOT use this for its log line -- renderJobState()'s
-			// summary line already states the same count+failed tally
-			// right above the stats grid, so repeating it in the log
-			// line too would just be the same sentence twice in a row;
-			// see 'doneLabel' below for what the tool page uses instead.
+			// live-update (admin-heartbeat.js). The tool page itself does
+			// NOT use this for its own summary -- see 'generatedFinal'/
+			// 'failedSummary' above for what it uses instead.
 			/* translators: %d: number of images. */
 			'generateDone'                 => __( 'Done -- generated %d image(s).', 'webp-generator' ),
 			/* translators: %d: number of images that failed to convert. Deliberately doesn't say "below"/"above" -- this string is reused in more than one place on the page relative to the "Failed conversions" panel it points at, so a directional reference goes stale wherever it ends up on the wrong side. */
@@ -342,20 +388,12 @@ class WWG_Admin {
 			'cacheCleared'                 => __( 'Also cleared the page cache so these take effect right away.', 'webp-generator' ),
 			// Same underlying fact as 'cacheCleared' above, worded so it
 			// reads correctly no matter how long ago the run actually
-			// finished -- used in renderDoneUI()'s summary line, which
+			// finished -- used in Region 3's done-state summary, which
 			// (unlike the notice) is exactly the "possibly reading this
 			// days later" context 'cacheCleared' isn't safe for.
 			'cacheClearedPast'             => __( 'The page cache was also cleared as part of that run.', 'webp-generator' ),
-			/* translators: %s: date and time the run finished, e.g. "Aug 10, 2026, 5:46 PM" -- formatted client-side in the visitor's own locale/timezone. */
-			'lastRunPrefix'                => __( 'Last run (%s):', 'webp-generator' ),
-			// What the tool page's own log line says on completion -- just
-			// the terminal status fact ("done" stays true no matter how
-			// long ago it happened, unlike the timestamped summary line
-			// right above it, which needed 'lastRunPrefix' specifically
-			// because *its* wording describes a point-in-time event, not
-			// an ongoing fact).
-			'doneLabel'                    => __( 'Done.', 'webp-generator' ),
-			'paused'                       => __( 'Paused. Click "Generate" to pick up where this left off.', 'webp-generator' ),
+			'resumeGenerating'             => __( 'Resume Generating', 'webp-generator' ),
+			'paused'                       => __( 'Paused. Click "Resume Generating" to pick up where this left off.', 'webp-generator' ),
 			'vsOriginal'                   => __( 'vs.', 'webp-generator' ),
 			'folders'                      => __( 'folders', 'webp-generator' ),
 			'images'                       => __( 'images', 'webp-generator' ),
@@ -421,6 +459,99 @@ class WWG_Admin {
 				'stats'       => $result['stats'],
 			)
 		);
+	}
+
+	/**
+	 * AJAX: persist the final tally from a completed client-driven Scan
+	 * pass, so the tool page's "Library Status" region can survive a
+	 * reload the same way Generate's own results already do (see
+	 * OPTION_SCAN_STATE). Fired once by admin.js's finishScan(), not
+	 * per-batch -- entirely separate from handle_ajax()/process_batch()'s
+	 * per-batch request/response shape above, which this doesn't touch.
+	 */
+	public function handle_save_scan_result() {
+		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
+
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
+		}
+
+		$failures = array();
+		if ( isset( $_POST['failures'] ) ) {
+			// wp_unslash() first -- WordPress adds slashes to all $_POST
+			// data, and json_decode() on a slashed string silently fails
+			// on any value containing a quote (exactly what a real decode
+			// error message is often full of).
+			$decoded = json_decode( wp_unslash( $_POST['failures'] ), true );
+			if ( is_array( $decoded ) ) {
+				// Capped the same way WWG_Job's own accumulated failures
+				// are -- this is a client-reported list, not to be trusted
+				// for length any more than for content.
+				foreach ( array_slice( $decoded, -500 ) as $failure ) {
+					if ( isset( $failure['file'], $failure['error'] ) && is_string( $failure['file'] ) && is_string( $failure['error'] ) ) {
+						$failures[] = array(
+							'file'  => sanitize_text_field( $failure['file'] ),
+							'error' => sanitize_text_field( $failure['error'] ),
+						);
+					}
+				}
+			}
+		}
+
+		$state = array(
+			'missing'        => isset( $_POST['missing'] ) ? absint( $_POST['missing'] ) : 0,
+			'original_bytes' => isset( $_POST['original_bytes'] ) ? absint( $_POST['original_bytes'] ) : 0,
+			'failures'       => $failures,
+			'finished_at'    => time(), // Server clock -- never trust a client-sent timestamp.
+			'invalidated_at' => null,   // A scan that just finished is, by definition, not stale.
+		);
+
+		update_option( self::OPTION_SCAN_STATE, $state, false );
+
+		wp_send_json_success( $state );
+	}
+
+	/**
+	 * The persisted "Library Status" snapshot -- Scan's last completed
+	 * pass, read fresh on every page load so the tool page can hydrate
+	 * Region 1 the same way WWG_Job::get_hydrated_state() already lets it
+	 * hydrate Generate's own results. See OPTION_SCAN_STATE's docblock
+	 * for the shape and self-invalidation rationale.
+	 *
+	 * @return array
+	 */
+	private function get_scan_state() {
+		$defaults = array(
+			'missing'        => 0,
+			'original_bytes' => 0,
+			'failures'       => array(),
+			'finished_at'    => 0,
+			'invalidated_at' => null,
+		);
+
+		$state = get_option( self::OPTION_SCAN_STATE, array() );
+
+		return is_array( $state ) ? array_merge( $defaults, $state ) : $defaults;
+	}
+
+	/**
+	 * Marks the persisted Library Status snapshot stale. Called by
+	 * WWG_Job the moment a Generate run actually changes the library --
+	 * the same instant it already decides whether to clear the page
+	 * cache -- so Region 1 stops claiming to know something that's now
+	 * provably wrong, rather than silently lying until an arbitrary TTL
+	 * expires. Keeps the old numbers rather than deleting them, so the
+	 * tool page can explain *why* it reset instead of showing a generic
+	 * first-run message (see get_scan_state()'s 'invalidated_at').
+	 */
+	public function mark_scan_state_stale() {
+		$state = get_option( self::OPTION_SCAN_STATE, array() );
+		if ( ! is_array( $state ) || empty( $state['finished_at'] ) ) {
+			return; // Never scanned -- nothing to invalidate.
+		}
+
+		$state['invalidated_at'] = time();
+		update_option( self::OPTION_SCAN_STATE, $state, false );
 	}
 
 	/**
