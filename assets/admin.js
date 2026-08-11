@@ -164,6 +164,18 @@
 		} );
 	}
 
+	function requestClassifyFailures( files ) {
+		return requestJobAction( wwgAdmin.classifyAction, { files: JSON.stringify( files ) } );
+	}
+
+	function requestFixFailure( fileRel ) {
+		return requestJobAction( wwgAdmin.fixAction, { file: fileRel } );
+	}
+
+	function requestDeleteFailure( fileRel ) {
+		return requestJobAction( wwgAdmin.deleteAction, { file: fileRel } );
+	}
+
 	// ---- Shared rendering helpers (both Region 1 and Region 3 use these) ----
 
 	function setStatusDot( el, state ) {
@@ -177,7 +189,8 @@
 
 	// Shared by Region 1's own "Failed conversions" (known failures Scan
 	// re-surfaced) and Region 3's (this Generate run's failures) -- a
-	// failure reads the same regardless of which box is reporting it.
+	// failure reads the same regardless of which box is reporting it,
+	// right down to the next-best-action offered on it.
 	function renderFailuresInto( listEl, countEl, detailsEl, failures ) {
 		if ( ! failures || ! failures.length ) {
 			detailsEl.hidden = true;
@@ -192,10 +205,252 @@
 		var toShow = failures.slice( -50 );
 		listEl.innerHTML = '';
 		toShow.forEach( function ( failure ) {
-			var li = document.createElement( 'li' );
-			li.textContent = failure.file + ': ' + failure.error;
-			listEl.appendChild( li );
+			listEl.appendChild( buildFailureRow( failure ) );
 		} );
+
+		// Rows start with no action buttons at all -- what's actually
+		// possible for a given file (fix, delete, or delete-the-whole-
+		// attachment) is a fact about WordPress's current state, not
+		// something to guess from the filename client-side, so it's
+		// always asked for fresh rather than cached from an earlier
+		// render (an attachment could have changed since).
+		requestClassifyFailures( toShow.map( function ( failure ) { return failure.file; } ) )
+			.then( function ( json ) {
+				if ( ! json.success ) {
+					return;
+				}
+				Array.prototype.forEach.call( listEl.children, function ( li ) {
+					var info = json.data[ li.dataset.file ];
+					if ( info ) {
+						renderRowActions( li, li.dataset.file, info );
+					}
+				} );
+			} );
+	}
+
+	function buildFailureRow( failure ) {
+		var li = document.createElement( 'li' );
+		li.dataset.file = failure.file;
+
+		var text = document.createElement( 'span' );
+		text.className = 'wwg-failure-text';
+		text.textContent = failure.file + ': ' + failure.error;
+		li.appendChild( text );
+
+		var actions = document.createElement( 'div' );
+		actions.className = 'wwg-failure-actions';
+		li.appendChild( actions );
+
+		var status = document.createElement( 'span' );
+		status.className = 'wwg-failure-status';
+		status.hidden = true;
+		li.appendChild( status );
+
+		return li;
+	}
+
+	function buildRowButton( label, extraClass ) {
+		var btn = document.createElement( 'button' );
+		btn.type = 'button';
+		btn.className = 'button button-small wwg-row-btn' + ( extraClass ? ' ' + extraClass : '' );
+		btn.textContent = label;
+		return btn;
+	}
+
+	function buildViewInMediaLibraryLink( url ) {
+		var a = document.createElement( 'a' );
+		a.className = 'wwg-row-link';
+		a.href = url;
+		a.target = '_blank';
+		a.rel = 'noopener noreferrer';
+		a.textContent = wwgAdmin.strings.viewInMediaLibrary;
+		return a;
+	}
+
+	function insertReason( li, text ) {
+		var reason = document.createElement( 'span' );
+		reason.className = 'wwg-failure-reason';
+		reason.textContent = text;
+		li.insertBefore( reason, li.querySelector( '.wwg-failure-actions' ) );
+	}
+
+	// Builds the actual next-best-action for one row, based on what
+	// classify_failure() determined server-side -- see its docblock in
+	// class-wwg-admin.php for the three possible outcomes this switches on.
+	function renderRowActions( li, fileRel, info ) {
+		var actions = li.querySelector( '.wwg-failure-actions' );
+		actions.innerHTML = '';
+		var existingReason = li.querySelector( '.wwg-failure-reason' );
+		if ( existingReason ) {
+			existingReason.remove();
+		}
+
+		if ( 'fix_or_delete' === info.action ) {
+			var fixBtn = buildRowButton( wwgAdmin.strings.fixThisFile, 'button-primary' );
+			fixBtn.addEventListener( 'click', function () {
+				runRowAction( li, fileRel, requestFixFailure, wwgAdmin.strings.fixing );
+			} );
+			actions.appendChild( fixBtn );
+
+			var deleteLink = document.createElement( 'button' );
+			deleteLink.type = 'button';
+			deleteLink.className = 'wwg-row-link';
+			deleteLink.textContent = wwgAdmin.strings.deleteInstead;
+			deleteLink.addEventListener( 'click', function () {
+				if ( window.confirm( wwgAdmin.strings.confirmDeleteDerivative ) ) {
+					runRowAction( li, fileRel, requestDeleteFailure, wwgAdmin.strings.deleting );
+				}
+			} );
+			actions.appendChild( deleteLink );
+		} else if ( 'delete_only' === info.action ) {
+			if ( info.reason ) {
+				insertReason( li, info.reason );
+			}
+
+			var deleteBtn = buildRowButton( wwgAdmin.strings.deleteThisFile );
+			deleteBtn.addEventListener( 'click', function () {
+				if ( window.confirm( wwgAdmin.strings.confirmDeleteOnly ) ) {
+					runRowAction( li, fileRel, requestDeleteFailure, wwgAdmin.strings.deleting );
+				}
+			} );
+			actions.appendChild( deleteBtn );
+
+			if ( info.edit_url ) {
+				actions.appendChild( buildViewInMediaLibraryLink( info.edit_url ) );
+			}
+		} else if ( 'delete_original' === info.action ) {
+			insertReason( li, wwgAdmin.strings.originalNote );
+
+			var deleteOriginalBtn = buildRowButton( wwgAdmin.strings.deleteThisFile, 'wwg-row-btn--danger' );
+			deleteOriginalBtn.addEventListener( 'click', function () {
+				if ( window.confirm( wwgAdmin.strings.confirmDeleteOriginal ) ) {
+					runRowAction( li, fileRel, requestDeleteFailure, wwgAdmin.strings.deleting );
+				}
+			} );
+			actions.appendChild( deleteOriginalBtn );
+
+			if ( info.edit_url ) {
+				actions.appendChild( buildViewInMediaLibraryLink( info.edit_url ) );
+			}
+		}
+	}
+
+	function setRowBusy( li, label ) {
+		var actions = li.querySelector( '.wwg-failure-actions' );
+		Array.prototype.forEach.call( actions.querySelectorAll( 'button' ), function ( btn ) {
+			btn.disabled = true;
+		} );
+		var statusEl = li.querySelector( '.wwg-failure-status' );
+		statusEl.hidden = false;
+		statusEl.className = 'wwg-failure-status';
+		statusEl.textContent = label;
+	}
+
+	function setRowMessage( li, message, isError ) {
+		var actions = li.querySelector( '.wwg-failure-actions' );
+		Array.prototype.forEach.call( actions.querySelectorAll( 'button' ), function ( btn ) {
+			btn.disabled = false;
+		} );
+		var statusEl = li.querySelector( '.wwg-failure-status' );
+		statusEl.hidden = false;
+		statusEl.className = 'wwg-failure-status' + ( isError ? ' wwg-failure-status--error' : '' );
+		statusEl.textContent = message;
+	}
+
+	// Shared by both the "Fix this file" and every "Delete..." button --
+	// only what request function to call and which in-flight label to
+	// show actually differs between them; which of fixed/deleted actually
+	// happened is read back from the response itself, not assumed from
+	// which button was clicked.
+	function runRowAction( li, fileRel, requestFn, inFlightLabel ) {
+		setRowBusy( li, inFlightLabel );
+
+		requestFn( fileRel ).then( function ( json ) {
+			if ( ! json.success ) {
+				setRowMessage( li, wwgAdmin.strings.actionFailedMessage, true );
+				return;
+			}
+
+			var result = json.data;
+			if ( 'fixed' === result.outcome || 'deleted' === result.outcome ) {
+				var fixed = 'fixed' === result.outcome;
+				removeFailureFromScanState( fileRel, fixed );
+				removeFailureFromJobState( fileRel, fixed );
+				refreshAfterFailureResolved();
+				return;
+			}
+
+			// 'not_regenerable' / 'stale' / 'failed' -- surface why, and
+			// re-classify this one row so its buttons reflect reality
+			// (e.g. a since-broken original now offers delete instead of
+			// fix) without needing a full page reload.
+			setRowMessage( li, result.message || wwgAdmin.strings.actionFailedMessage, true );
+			requestClassifyFailures( [ fileRel ] ).then( function ( classifyJson ) {
+				if ( classifyJson.success && classifyJson.data[ fileRel ] ) {
+					renderRowActions( li, fileRel, classifyJson.data[ fileRel ] );
+				}
+			} );
+		} ).catch( function () {
+			setRowMessage( li, wwgAdmin.strings.actionFailedMessage, true );
+		} );
+	}
+
+	// Mirrors WWG_Admin::remove_failure_from_scan_state() exactly -- kept
+	// in sync client-side so both regions reflect a fix/delete right
+	// away, without waiting on a fresh Scan/Generate run to notice.
+	function removeFailureFromScanState( fileRel, fixed ) {
+		if ( ! scanState || ! scanState.failures || ! scanState.failures.length ) {
+			return;
+		}
+		var before = scanState.failures.length;
+		scanState.failures = scanState.failures.filter( function ( failure ) {
+			return failure.file !== fileRel;
+		} );
+		if ( scanState.failures.length === before ) {
+			return; // Wasn't listed here -- nothing to adjust.
+		}
+		if ( ! fixed ) {
+			scanState.missing = Math.max( 0, scanState.missing - 1 );
+		}
+	}
+
+	// Mirrors WWG_Job::remove_failure_from_state() exactly.
+	function removeFailureFromJobState( fileRel, fixed ) {
+		if ( ! jobState || ! jobState.stats || ! jobState.stats.failures || ! jobState.stats.failures.length ) {
+			return;
+		}
+		var before = jobState.stats.failures.length;
+		jobState.stats.failures = jobState.stats.failures.filter( function ( failure ) {
+			return failure.file !== fileRel;
+		} );
+		if ( jobState.stats.failures.length === before ) {
+			return; // Wasn't part of this run's own record -- nothing to adjust.
+		}
+		jobState.stats.failed = Math.max( 0, jobState.stats.failed - 1 );
+		if ( fixed ) {
+			jobState.stats.converted += 1;
+		} else {
+			jobState.stats.missing = Math.max( 0, jobState.stats.missing - 1 );
+			jobState.total_missing = Math.max( 0, jobState.total_missing - 1 );
+		}
+	}
+
+	// Re-renders whichever regions actually have something to show,
+	// after a fix/delete has already patched scanState/jobState in
+	// place -- reuses the existing render functions rather than
+	// hand-patching the DOM further, so headline sentences, counts, and
+	// the failures list itself all stay correct in one pass.
+	function refreshAfterFailureResolved() {
+		if ( scanState.finished_at && ! scanState.invalidated_at ) {
+			renderStatusDone();
+		}
+		if ( 'running' === jobState.status ) {
+			renderResultsRunning();
+		} else if ( 'paused' === jobState.status ) {
+			renderResultsPaused();
+		} else if ( 'done' === jobState.status ) {
+			renderResultsDone();
+		}
 	}
 
 	// The one place Scan/Generate/Cancel's enabled/disabled state and

@@ -4,7 +4,7 @@ Tags: webp, image optimization, performance, media, images
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.13.0
+Stable tag: 1.14.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -31,7 +31,7 @@ If your site runs Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, or L
 
 * Configurable WebP quality (1-100, default 75).
 * Works with any uploads folder layout, not just WordPress's default year/month structure.
-* A handful of filters for developers: `wwg_scan_directories`, `wwg_clear_cache_for_attachment`, `wwg_clear_all_cache`, `wwg_attempt_recovery`.
+* A handful of filters for developers: `wwg_scan_directories`, `wwg_clear_cache_for_attachment`, `wwg_clear_all_cache`, `wwg_attempt_recovery`, `wwg_allow_failure_actions`.
 
 == Installation ==
 
@@ -50,7 +50,9 @@ The plugin still generates the `.webp` files, but it can't edit Nginx's config f
 
 = Does this replace or delete my original images? =
 
-No. `.webp` files are written alongside the originals; nothing existing is ever deleted, replaced, or modified.
+Not automatically, and never a healthy one. `.webp` files are written alongside the originals; nothing existing is ever deleted, replaced, or modified as a side effect of Scan or Generate.
+
+The one deliberate exception: a file that's already proven corrupt and unrecoverable (it failed normal conversion *and* the embedded-data recovery attempt) gets a "Fix this file" / "Delete this file" action in the "Failed conversions" list, so you're not left with no way to clear it out. Fixing a broken thumbnail-size file regenerates it from its healthy original — the original itself is never touched. Deleting is available too, always behind a confirmation, and if the corrupt file turns out to be the original image itself, deleting it removes the whole attachment (confirmed with a stronger, more explicit warning first) rather than leaving a broken remainder behind. Every action is a deliberate, per-file click — never automatic, and never offered for a file that isn't already confirmed broken. Can be turned off entirely with the `wwg_allow_failure_actions` filter.
 
 = What happens to the .webp files or my .htaccess rule if I uninstall the plugin? =
 
@@ -75,6 +77,9 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 3. Settings: configurable WebP quality.
 
 == Changelog ==
+
+= 1.14.0 =
+* Each entry in "Failed conversions" now offers a real next step instead of just an error message: "Fix this file" regenerates a broken thumbnail-size image straight from its healthy original (and converts the fresh result to `.webp`), or "Delete instead"/"Delete this file" clears it out. If the corrupt file turns out to be the original image itself, deleting it removes the whole attachment, with a stronger, more explicit confirmation first. Every action is a deliberate per-file click, gated behind the same confirmation a destructive action always gets, and never offered for anything that isn't already a confirmed, permanent failure. See the FAQ for exactly what this does and doesn't touch, and the new `wwg_allow_failure_actions` filter to disable it entirely.
 
 = 1.13.0 =
 * Tools → WebP Generator has been reorganized around three clear questions instead of one line of text that got overwritten depending on which tool ran most recently: what's currently true about your library ("Library status"), what you can do right now (Scan/Generate/Cancel), and what a completed Generate run actually did, dated ("Last run"). Library status now persists across reloads the same way a completed Generate run already does, instead of resetting to blank every time -- Scan is no longer limited to once per page load, and Generate can tell right away whether there's anything to do without needing a fresh Scan first.
@@ -105,6 +110,9 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 * Initial release.
 
 == Upgrade Notice ==
+
+= 1.14.0 =
+"Failed conversions" now offers a real fix or delete action per file instead of just an error message -- see the FAQ for exactly what this does and doesn't touch.
 
 = 1.13.0 =
 Tools → WebP Generator is reorganized around what's currently true, what you can do, and what a completed run actually did -- Library status now persists across reloads and Scan is no longer limited to once per page load.

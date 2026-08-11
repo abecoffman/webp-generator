@@ -538,6 +538,61 @@ class WWG_Job {
 	}
 
 	/**
+	 * Called by WWG_Admin once a failure listed in this run's own record
+	 * stops being one -- fixed (regenerated) or deleted through the
+	 * "Failed conversions" panel's per-row action -- so the persisted
+	 * "Last run" summary reflects it without needing a whole new Generate
+	 * run. A no-op if $file_rel isn't actually in this run's failures
+	 * (e.g. it was only ever in the Library Status snapshot, not a
+	 * completed Generate run's own record).
+	 *
+	 * @param string $file_rel Relative path under uploads.
+	 * @param bool   $fixed    True if regenerated (reclassified from
+	 *                         failed to converted -- the run's total
+	 *                         attempted count doesn't change); false if
+	 *                         deleted (removed from the run's totals
+	 *                         entirely -- it's not "missing" a .webp
+	 *                         anymore, there's nothing left to convert).
+	 */
+	public function remove_failure_from_state( $file_rel, $fixed ) {
+		$state = $this->get_state();
+		if ( empty( $state['stats']['failures'] ) ) {
+			return;
+		}
+
+		$before                     = count( $state['stats']['failures'] );
+		$state['stats']['failures'] = array_values(
+			array_filter(
+				$state['stats']['failures'],
+				static function ( $failure ) use ( $file_rel ) {
+					return ! isset( $failure['file'] ) || $failure['file'] !== $file_rel;
+				}
+			)
+		);
+
+		if ( count( $state['stats']['failures'] ) === $before ) {
+			return; // Wasn't part of this run's own record -- nothing to adjust.
+		}
+
+		$state['stats']['failed'] = max( 0, $state['stats']['failed'] - 1 );
+
+		if ( $fixed ) {
+			++$state['stats']['converted'];
+		} else {
+			$state['stats']['missing'] = max( 0, $state['stats']['missing'] - 1 );
+			// Keeps the progress bar's processed/target math consistent --
+			// a deleted file was never going to be converted, so it
+			// shouldn't stay counted in what this run originally set out
+			// to do either (otherwise a previously-100%-done run could
+			// show under 100% after a deletion that happened well after
+			// it finished).
+			$state['total_missing'] = max( 0, $state['total_missing'] - 1 );
+		}
+
+		$this->write_state( $state );
+	}
+
+	/**
 	 * @param array $state
 	 * @return array
 	 */

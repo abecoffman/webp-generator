@@ -355,11 +355,87 @@ details summary {
 }
 
 .wwg-failures-list li {
-	padding: 6px 0;
+	padding: 8px 0;
 }
 
 .wwg-failures-list li + li {
 	border-top: 1px solid #dcdcde;
+}
+
+.wwg-failure-text {
+	display: block;
+}
+
+/* A file already proven unfixable (its original is also broken, or
+ * nothing in WordPress even references it) -- explains why no "Fix"
+ * button is offered, or (for a corrupt original itself) why deleting it
+ * takes the whole attachment with it.
+ */
+.wwg-failure-reason {
+	display: block;
+	margin: 3px 0 0;
+	color: #646970;
+	font-style: italic;
+}
+
+.wwg-failure-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 6px;
+}
+
+.wwg-failure-actions:empty {
+	display: none;
+}
+
+.wwg-row-btn {
+	font-size: 12px !important;
+	padding: 0 8px !important;
+	height: auto !important;
+	line-height: 2 !important;
+}
+
+/* Reserved for the one action in this panel that isn't reversible the
+ * way regenerating a thumbnail is -- deleting a corrupt *original*
+ * takes the whole attachment with it. Same red WP core itself uses for
+ * its own destructive actions (e.g. "Delete Permanently"), not a new
+ * color invented for this plugin.
+ */
+.wwg-row-btn--danger {
+	color: #b32d2e;
+	border-color: #b32d2e;
+	background: #fff;
+}
+
+.wwg-row-btn--danger:hover {
+	background: #fcf0f1;
+}
+
+.wwg-row-link {
+	font-family: inherit;
+	font-size: 12px;
+	color: #646970;
+	text-decoration: underline;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+}
+
+.wwg-row-link:hover {
+	color: #2271b1;
+}
+
+.wwg-failure-status {
+	display: block;
+	margin: 6px 0 0;
+	font-size: 12px;
+	color: #646970;
+}
+
+.wwg-failure-status--error {
+	color: #b32d2e;
 }
 
 .wwg-recoveries {

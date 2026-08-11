@@ -17,13 +17,16 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class WWG_Admin {
 
-	const AJAX_ACTION      = 'wwg_process_batch';
-	const ACTION_SAVE_SCAN = 'wwg_save_scan_result';
-	const NONCE_ACTION     = 'wwg_admin';
-	const SETTINGS_NONCE   = 'wwg_settings';
-	const HTACCESS_NONCE   = 'wwg_htaccess';
-	const CAPABILITY       = 'manage_options';
-	const PAGE_SLUG        = 'webp-generator';
+	const AJAX_ACTION              = 'wwg_process_batch';
+	const ACTION_SAVE_SCAN         = 'wwg_save_scan_result';
+	const ACTION_CLASSIFY_FAILURES = 'wwg_classify_failures';
+	const ACTION_FIX_FAILURE       = 'wwg_fix_failure';
+	const ACTION_DELETE_FAILURE    = 'wwg_delete_failure';
+	const NONCE_ACTION             = 'wwg_admin';
+	const SETTINGS_NONCE           = 'wwg_settings';
+	const HTACCESS_NONCE           = 'wwg_htaccess';
+	const CAPABILITY               = 'manage_options';
+	const PAGE_SLUG                = 'webp-generator';
 
 	/**
 	 * How many files list_images_in_dir() results process_batch() looks
@@ -170,6 +173,9 @@ class WWG_Admin {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
 		add_action( 'wp_ajax_' . self::AJAX_ACTION, array( $this, 'handle_ajax' ) );
 		add_action( 'wp_ajax_' . self::ACTION_SAVE_SCAN, array( $this, 'handle_save_scan_result' ) );
+		add_action( 'wp_ajax_' . self::ACTION_CLASSIFY_FAILURES, array( $this, 'handle_classify_failures' ) );
+		add_action( 'wp_ajax_' . self::ACTION_FIX_FAILURE, array( $this, 'handle_fix_failure' ) );
+		add_action( 'wp_ajax_' . self::ACTION_DELETE_FAILURE, array( $this, 'handle_delete_failure' ) );
 		add_action( 'admin_init', array( $this, 'maybe_save_settings' ) );
 		add_action( 'admin_init', array( $this, 'maybe_handle_htaccess_action' ) );
 	}
@@ -285,6 +291,9 @@ class WWG_Admin {
 				'ajaxUrl'        => admin_url( 'admin-ajax.php' ),
 				'action'         => self::AJAX_ACTION,
 				'scanSaveAction' => self::ACTION_SAVE_SCAN,
+				'classifyAction' => self::ACTION_CLASSIFY_FAILURES,
+				'fixAction'      => self::ACTION_FIX_FAILURE,
+				'deleteAction'   => self::ACTION_DELETE_FAILURE,
 				'nonce'          => wp_create_nonce( self::NONCE_ACTION ),
 				'jobState'       => $this->job->get_hydrated_state(),
 				'scanState'      => $this->get_scan_state(),
@@ -399,6 +408,23 @@ class WWG_Admin {
 			'images'                       => __( 'images', 'webp-generator' ),
 			'viewResults'                  => __( 'View results →', 'webp-generator' ),
 			'error'                        => __( 'Something went wrong:', 'webp-generator' ),
+
+			// Per-row "next best action" on a Failed conversions entry --
+			// see WWG_Attachment_Resolver/WWG_Admin::classify_failure() for
+			// how a file ends up in one of these buckets.
+			'fixThisFile'                  => __( 'Fix this file', 'webp-generator' ),
+			'fixing'                       => __( 'Fixing…', 'webp-generator' ),
+			'deleteInstead'                => __( 'Delete instead', 'webp-generator' ),
+			'deleteThisFile'               => __( 'Delete this file', 'webp-generator' ),
+			'deleting'                     => __( 'Deleting…', 'webp-generator' ),
+			'viewInMediaLibrary'           => __( 'View in Media Library →', 'webp-generator' ),
+			'confirmDeleteDerivative'      => __( 'Delete this file instead of fixing it? This permanently removes the broken image size. Nothing will recreate it automatically unless you click Generate again.', 'webp-generator' ),
+			'confirmDeleteOnly'            => __( 'Permanently delete this corrupted file? It can’t be recovered afterward.', 'webp-generator' ),
+			'confirmDeleteOriginal'        => __( 'This is the original image, not a generated size — deleting it removes the entire attachment (the original and every generated size) permanently, and can’t be undone. Delete it anyway?', 'webp-generator' ),
+			'originalNote'                 => __( 'This is the original image, not a generated size.', 'webp-generator' ),
+			'fixedMessage'                 => __( 'Fixed — regenerated from the original.', 'webp-generator' ),
+			'deletedMessage'               => __( 'Deleted.', 'webp-generator' ),
+			'actionFailedMessage'          => __( 'That didn’t work. Check your server’s error log, or try again.', 'webp-generator' ),
 		);
 	}
 
@@ -552,6 +578,450 @@ class WWG_Admin {
 
 		$state['invalidated_at'] = time();
 		update_option( self::OPTION_SCAN_STATE, $state, false );
+	}
+
+	/**
+	 * @param string $file_rel Relative path under uploads.
+	 * @return string Absolute path.
+	 */
+	private function abs_path_for( $file_rel ) {
+		$upload_dir = wp_get_upload_dir();
+		return trailingslashit( $upload_dir['basedir'] ) . $file_rel;
+	}
+
+	/**
+	 * AJAX: classify a batch of currently-listed failures so the tool page
+	 * can show the right next-best-action per row (Fix, Delete, or a plain
+	 * explanation) *before* the admin clicks anything -- getting this
+	 * right up front matters most for the riskiest case (a corrupt
+	 * original), where the row needs to show the stronger delete warning
+	 * from the start, not discover that only after a wrong click.
+	 */
+	public function handle_classify_failures() {
+		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
+
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
+		}
+
+		$classifications = array();
+
+		if ( isset( $_POST['files'] ) ) {
+			$decoded = json_decode( wp_unslash( $_POST['files'] ), true );
+			if ( is_array( $decoded ) ) {
+				// Capped the same way every other client-reported list in
+				// this class is -- not to be trusted for length any more
+				// than for content.
+				foreach ( array_slice( $decoded, 0, 500 ) as $file_rel ) {
+					if ( is_string( $file_rel ) && '' !== $file_rel ) {
+						$classifications[ $file_rel ] = $this->classify_failure( $file_rel );
+					}
+				}
+			}
+		}
+
+		wp_send_json_success( $classifications );
+	}
+
+	/**
+	 * AJAX: regenerate one failed file from its attachment's healthy
+	 * original. See classify_failure()/fix_failure() for the full
+	 * decision tree and mechanics.
+	 */
+	public function handle_fix_failure() {
+		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
+
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
+		}
+
+		$file_rel = isset( $_POST['file'] ) ? sanitize_text_field( wp_unslash( $_POST['file'] ) ) : '';
+		if ( '' === $file_rel ) {
+			wp_send_json_error( array( 'message' => __( 'Something went wrong:', 'webp-generator' ) ), 400 );
+		}
+
+		// The filter is consulted (and enforced) inside classify_failure()
+		// already, and fix_failure() itself refuses to proceed unless
+		// classify_failure() confirms 'fix_or_delete' -- a filtered-off
+		// site is naturally covered by that same check, not a separate
+		// one here.
+		wp_send_json_success( $this->fix_failure( $file_rel ) );
+	}
+
+	/**
+	 * AJAX: delete one failed file -- either just the broken derivative,
+	 * or (if it turns out to be the original) the entire attachment. Which
+	 * one happens is always re-derived server-side from classify_failure(),
+	 * never taken from a client-sent flag, given how consequential getting
+	 * this wrong would be. Unlike fix_failure(), delete_failure_file()/
+	 * delete_original_attachment() don't re-check classify_failure()
+	 * themselves (there's no equivalent "is this actually a fix" fact for
+	 * them to re-derive), so the filter is enforced explicitly here.
+	 */
+	public function handle_delete_failure() {
+		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
+
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
+		}
+
+		$file_rel = isset( $_POST['file'] ) ? sanitize_text_field( wp_unslash( $_POST['file'] ) ) : '';
+		if ( '' === $file_rel ) {
+			wp_send_json_error( array( 'message' => __( 'Something went wrong:', 'webp-generator' ) ), 400 );
+		}
+
+		$classification = $this->classify_failure( $file_rel );
+
+		if ( 'none' === $classification['action'] ) {
+			wp_send_json_success( $this->generic_action_failure( $file_rel ) );
+			return;
+		}
+
+		if ( 'delete_original' === $classification['action'] ) {
+			wp_send_json_success( $this->delete_original_attachment( $file_rel ) );
+		} else {
+			wp_send_json_success( $this->delete_failure_file( $file_rel ) );
+		}
+	}
+
+	/**
+	 * Works out what can actually be done about one failed file: fix it
+	 * (a regenerable derivative with a healthy original), delete it (a
+	 * derivative that can't be regenerated, or a file WordPress has no
+	 * record of at all), or delete the whole attachment (the file itself
+	 * is the original). Cheap -- one resolver lookup plus a couple of
+	 * file_exists()/metadata checks -- safe to call on every row render,
+	 * not just when a button is actually clicked, since a fresh answer
+	 * matters more here than caching a possibly-stale one.
+	 *
+	 * @param string $file_rel Relative path under uploads.
+	 * @return array {
+	 *     @type string $action   One of 'fix_or_delete', 'delete_only',
+	 *                            'delete_original', or 'none' (no action
+	 *                            offered at all -- see the
+	 *                            wwg_allow_failure_actions filter).
+	 *     @type string $reason   Human-readable explanation. Present for
+	 *                            'delete_only' only.
+	 *     @type string $edit_url The attachment's edit-screen URL.
+	 *                            Present whenever an attachment was
+	 *                            resolved at all.
+	 * }
+	 */
+	private function classify_failure( $file_rel ) {
+		/**
+		 * Whether the "Fix this file" / "Delete this file" row actions on
+		 * a Failed conversions entry are offered at all. Return false to
+		 * disable entirely -- e.g. for a site that would rather these
+		 * files were always handled by hand. Doesn't affect anything
+		 * else about how failures are found or reported, only whether an
+		 * action is offered for them.
+		 *
+		 * @param bool   $allow    Whether to allow it. Default true.
+		 * @param string $file_rel The relative file path being classified.
+		 */
+		if ( ! apply_filters( 'wwg_allow_failure_actions', true, $file_rel ) ) {
+			return array( 'action' => 'none' );
+		}
+
+		$resolved = WWG_Attachment_Resolver::resolve( $file_rel );
+
+		if ( false === $resolved ) {
+			return array(
+				'action' => 'delete_only',
+				'reason' => __( 'No Media Library item found for this file — probably added outside WordPress, or already removed.', 'webp-generator' ),
+			);
+		}
+
+		$edit_url = (string) get_edit_post_link( $resolved['attachment_id'], 'raw' );
+
+		if ( $resolved['is_original'] ) {
+			return array(
+				'action'   => 'delete_original',
+				'edit_url' => $edit_url,
+			);
+		}
+
+		$original_path = $resolved['original_path'];
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the original can legitimately be missing or unreadable; that's exactly the condition being checked for here.
+		if ( ! $original_path || ! file_exists( $original_path ) || 0 === (int) @filesize( $original_path ) ) {
+			return array(
+				'action'   => 'delete_only',
+				'reason'   => __( 'The original image for this file is also missing or broken, so it can’t be regenerated.', 'webp-generator' ),
+				'edit_url' => $edit_url,
+			);
+		}
+
+		return array(
+			'action'   => 'fix_or_delete',
+			'edit_url' => $edit_url,
+		);
+	}
+
+	/**
+	 * Regenerate one failed file from its attachment's healthy original,
+	 * then convert the fresh result to .webp. Never touches anything if
+	 * classify_failure() doesn't confirm this file is actually regenerable.
+	 *
+	 * @param string $file_rel Relative path under uploads.
+	 * @return array {outcome, file, message}
+	 */
+	private function fix_failure( $file_rel ) {
+		$abs_path = $this->abs_path_for( $file_rel );
+
+		// Re-verify server-side this file is actually still broken --
+		// never trust a possibly-stale client click for something this
+		// consequential. If it's already fine, there's nothing to fix,
+		// just stale bookkeeping to clear.
+		$recheck = $this->generator->ensure_webp( $abs_path );
+		if ( in_array( $recheck['status'], array( 'exists', 'created' ), true ) ) {
+			$this->clear_failure_record( $file_rel, true );
+			return array(
+				'outcome' => 'fixed',
+				'file'    => $file_rel,
+				'message' => __( 'This file was already fixed.', 'webp-generator' ),
+			);
+		}
+
+		$classification = $this->classify_failure( $file_rel );
+		if ( 'fix_or_delete' !== $classification['action'] ) {
+			return array(
+				'outcome'  => 'not_regenerable',
+				'file'     => $file_rel,
+				'message'  => isset( $classification['reason'] ) ? $classification['reason'] : __( 'That didn’t work. Check your server’s error log, or try again.', 'webp-generator' ),
+				'edit_url' => isset( $classification['edit_url'] ) ? $classification['edit_url'] : '',
+			);
+		}
+
+		$resolved = WWG_Attachment_Resolver::resolve( $file_rel );
+		if ( false === $resolved || $resolved['is_original'] ) {
+			// Shouldn't happen -- classify_failure() just confirmed this
+			// is a regenerable derivative -- but never trust a resolve()
+			// race blindly for something that writes a file.
+			return $this->generic_action_failure( $file_rel );
+		}
+
+		$metadata  = wp_get_attachment_metadata( $resolved['attachment_id'] );
+		$size_data = isset( $metadata['sizes'][ $resolved['size_name'] ] ) ? $metadata['sizes'][ $resolved['size_name'] ] : null;
+		if ( ! $size_data ) {
+			return $this->generic_action_failure( $file_rel );
+		}
+
+		$width  = (int) $size_data['width'];
+		$height = (int) $size_data['height'];
+		$crop   = $this->crop_setting_for( $resolved['size_name'] );
+
+		$result = image_make_intermediate_size( $resolved['original_path'], $width, $height, $crop );
+		if ( ! $result ) {
+			return $this->generic_action_failure( $file_rel );
+		}
+
+		// Only write metadata back if the regenerated file actually
+		// differs from what's already recorded -- the common case is an
+		// identical filename/dimensions, nothing to update.
+		if ( ! isset( $size_data['file'] ) || $result['file'] !== $size_data['file']
+			|| (int) $size_data['width'] !== (int) $result['width']
+			|| (int) $size_data['height'] !== (int) $result['height']
+		) {
+			$metadata['sizes'][ $resolved['size_name'] ] = $result;
+			wp_update_attachment_metadata( $resolved['attachment_id'], $metadata );
+		}
+
+		// image_make_intermediate_size() only produces the JPEG/PNG --
+		// this plugin's whole point is the .webp sibling, which still
+		// needs generating for the freshly-written file.
+		$webp_outcome = $this->generator->ensure_webp( $abs_path );
+		if ( ! in_array( $webp_outcome['status'], array( 'created', 'exists' ), true ) ) {
+			return array(
+				'outcome' => 'failed',
+				'file'    => $file_rel,
+				'message' => __( 'The image itself was regenerated, but creating its .webp version still failed. Check your server’s error log, or try again.', 'webp-generator' ),
+			);
+		}
+
+		$this->clear_failure_record( $file_rel, true );
+
+		return array(
+			'outcome' => 'fixed',
+			'file'    => $file_rel,
+			'message' => __( 'Fixed — regenerated from the original.', 'webp-generator' ),
+		);
+	}
+
+	/**
+	 * Delete one broken derivative file (or a fully unresolvable one) --
+	 * never the original; see delete_original_attachment() for that.
+	 *
+	 * @param string $file_rel Relative path under uploads.
+	 * @return array {outcome, file, message}
+	 */
+	private function delete_failure_file( $file_rel ) {
+		$abs_path = $this->abs_path_for( $file_rel );
+
+		if ( file_exists( $abs_path ) ) {
+			wp_delete_file( $abs_path );
+		}
+
+		// If this resolved to a real attachment size, strip it from the
+		// recorded metadata too -- otherwise WordPress keeps returning a
+		// URL for a file that now 404s.
+		$resolved = WWG_Attachment_Resolver::resolve( $file_rel );
+		if ( false === $resolved ) {
+			$resolved = null; // Already gone from disk -- resolve() naturally can't confirm it now; nothing more to clean up on the WordPress side.
+		}
+		if ( $resolved && ! $resolved['is_original'] && $resolved['size_name'] ) {
+			$metadata = wp_get_attachment_metadata( $resolved['attachment_id'] );
+			if ( isset( $metadata['sizes'][ $resolved['size_name'] ] ) ) {
+				unset( $metadata['sizes'][ $resolved['size_name'] ] );
+				wp_update_attachment_metadata( $resolved['attachment_id'], $metadata );
+			}
+		}
+
+		$this->clear_failure_record( $file_rel, false );
+
+		return array(
+			'outcome' => 'deleted',
+			'file'    => $file_rel,
+			'message' => __( 'Deleted.', 'webp-generator' ),
+		);
+	}
+
+	/**
+	 * Delete the entire attachment a corrupt *original* file belongs to
+	 * -- the file itself, every generated size, its post/postmeta, and
+	 * (automatically, via WWG_Generator::delete_siblings() already
+	 * hooking `delete_attachment`) any .webp siblings it has.
+	 *
+	 * @param string $file_rel Relative path under uploads.
+	 * @return array {outcome, file, message}
+	 */
+	private function delete_original_attachment( $file_rel ) {
+		$resolved = WWG_Attachment_Resolver::resolve( $file_rel );
+		if ( false === $resolved || ! $resolved['is_original'] ) {
+			// Resolved differently now than when this was classified --
+			// don't guess, bail rather than delete the wrong thing.
+			return array(
+				'outcome' => 'stale',
+				'file'    => $file_rel,
+				'message' => __( 'This file has changed since the page loaded. Reload and try again.', 'webp-generator' ),
+			);
+		}
+
+		$attachment_id = $resolved['attachment_id'];
+
+		// Sweep every other known failure belonging to this same
+		// attachment too (other broken sizes of it, if separately
+		// recorded) -- wp_delete_attachment() below is about to remove
+		// all of them from disk in one shot regardless.
+		$known = get_option( self::OPTION_KNOWN_FAILURES, array() );
+		foreach ( array_keys( $known ) as $other_file_rel ) {
+			if ( $other_file_rel === $file_rel ) {
+				continue;
+			}
+			$other = WWG_Attachment_Resolver::resolve( $other_file_rel );
+			if ( false !== $other && (int) $other['attachment_id'] === (int) $attachment_id ) {
+				$this->clear_failure_record( $other_file_rel, false );
+			}
+		}
+
+		$deleted = wp_delete_attachment( $attachment_id, true );
+		if ( ! $deleted ) {
+			return $this->generic_action_failure( $file_rel );
+		}
+
+		$this->clear_failure_record( $file_rel, false );
+
+		return array(
+			'outcome' => 'deleted',
+			'file'    => $file_rel,
+			'message' => __( 'Deleted.', 'webp-generator' ),
+		);
+	}
+
+	/**
+	 * Common bookkeeping once a failure stops being one -- whether fixed
+	 * (regenerated) or deleted. Keeps OPTION_KNOWN_FAILURES, the
+	 * persisted Library Status snapshot, and WWG_Job's own state all in
+	 * sync without requiring a fresh Scan/Generate run to reflect it.
+	 *
+	 * @param string $file_rel Relative path under uploads.
+	 * @param bool   $fixed    True if regenerated (counts as a fresh
+	 *                         conversion); false if deleted (counts as
+	 *                         removed, not converted).
+	 */
+	private function clear_failure_record( $file_rel, $fixed ) {
+		$this->forget_failure( $file_rel );
+		$this->remove_failure_from_scan_state( $file_rel, $fixed );
+		if ( $this->job ) {
+			$this->job->remove_failure_from_state( $file_rel, $fixed );
+		}
+	}
+
+	/**
+	 * @param string $file_rel Relative path.
+	 * @param bool   $fixed    See clear_failure_record().
+	 */
+	private function remove_failure_from_scan_state( $file_rel, $fixed ) {
+		$state = get_option( self::OPTION_SCAN_STATE, array() );
+		if ( ! is_array( $state ) || empty( $state['failures'] ) ) {
+			return;
+		}
+
+		$before            = count( $state['failures'] );
+		$state['failures'] = array_values(
+			array_filter(
+				$state['failures'],
+				static function ( $failure ) use ( $file_rel ) {
+					return ! isset( $failure['file'] ) || $failure['file'] !== $file_rel;
+				}
+			)
+		);
+
+		if ( count( $state['failures'] ) === $before ) {
+			return; // Wasn't listed here -- nothing to adjust.
+		}
+
+		// A fix doesn't change how many images Scan found missing a
+		// .webp -- it just stops being one of the ones that will never
+		// get one. A delete does: the file's gone, so it can't be
+		// "missing" anymore either.
+		if ( ! $fixed ) {
+			$state['missing'] = max( 0, (int) $state['missing'] - 1 );
+		}
+
+		update_option( self::OPTION_SCAN_STATE, $state, false );
+	}
+
+	/**
+	 * @param string $size_name A registered image size name.
+	 * @return bool Best-effort crop setting for regenerating this size --
+	 *              affects framing only, never whether the regeneration
+	 *              itself succeeds.
+	 */
+	private function crop_setting_for( $size_name ) {
+		if ( 'thumbnail' === $size_name ) {
+			return (bool) get_option( 'thumbnail_crop' );
+		}
+		if ( in_array( $size_name, array( 'medium', 'medium_large', 'large' ), true ) ) {
+			return false;
+		}
+
+		$additional = wp_get_additional_image_sizes();
+		return isset( $additional[ $size_name ]['crop'] ) ? (bool) $additional[ $size_name ]['crop'] : false;
+	}
+
+	/**
+	 * @param string $file_rel Relative path under uploads.
+	 * @return array A generic {outcome: 'failed', ...} response -- WP
+	 *               core's own image functions used here (
+	 *               image_make_intermediate_size(), wp_delete_attachment())
+	 *               don't surface a specific reason on failure.
+	 */
+	private function generic_action_failure( $file_rel ) {
+		return array(
+			'outcome' => 'failed',
+			'file'    => $file_rel,
+			'message' => __( 'That didn’t work. Check your server’s error log, or try again.', 'webp-generator' ),
+		);
 	}
 
 	/**
