@@ -92,6 +92,7 @@ class WWG_Admin_Reentrant_Fake extends \WWG_Admin {
 				'failed'         => 0,
 				'original_bytes' => 0,
 				'webp_bytes'     => 0,
+				'avif_bytes'     => 0,
 				'failures'       => array(),
 				'recoveries'     => array(),
 			),
@@ -242,6 +243,7 @@ class JobTest extends TestCase {
 					'failed'         => 0,
 					'original_bytes' => 0,
 					'webp_bytes'     => 0,
+					'avif_bytes'     => 0,
 					'failures'       => array(),
 					'recoveries'     => array(),
 				),
@@ -273,6 +275,7 @@ class JobTest extends TestCase {
 					'failed'         => 0,
 					'original_bytes' => 0,
 					'webp_bytes'     => 0,
+					'avif_bytes'     => 0,
 					'failures'       => array(),
 					'recoveries'     => array(),
 				),
@@ -361,6 +364,7 @@ class JobTest extends TestCase {
 					'failed'         => 1,
 					'original_bytes' => 100,
 					'webp_bytes'     => 50,
+					'avif_bytes'     => 0,
 					'failures'       => array(),
 				),
 				'cursor' => array(
@@ -390,6 +394,7 @@ class JobTest extends TestCase {
 					'failed'         => 1,
 					'original_bytes' => 100,
 					'webp_bytes'     => 50,
+					'avif_bytes'     => 0,
 					'failures'       => array(),
 				),
 			)
@@ -536,5 +541,196 @@ class JobTest extends TestCase {
 
 		$this->assertSame( 1, $admin->calls, 'The reentrant run_tick() call must not have run a second batch.' );
 		$this->assertSame( 'advanced', $this->last_json['outcome'] );
+	}
+
+	// ---- remove_failure_from_state() ----
+
+	public function test_remove_failure_from_state_reclassifies_a_fixed_entry_as_converted() {
+		$this->transients['wwg_job_state'] = $this->running_state(
+			array(
+				'stats' => array(
+					'scanned'        => 5,
+					'missing'        => 2,
+					'converted'      => 3,
+					'failed'         => 2,
+					'original_bytes' => 0,
+					'webp_bytes'     => 0,
+					'avif_bytes'     => 0,
+					'failures'       => array(
+						array( 'file' => '2024/01/a.jpg', 'format' => 'webp', 'error' => 'x' ),
+						array( 'file' => '2024/01/b.jpg', 'format' => 'webp', 'error' => 'y' ),
+					),
+				),
+			)
+		);
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		$job->remove_failure_from_state( '2024/01/a.jpg', 'webp', true );
+
+		$state = $this->transients['wwg_job_state'];
+		$this->assertCount( 1, $state['stats']['failures'] );
+		$this->assertSame( '2024/01/b.jpg', $state['stats']['failures'][0]['file'] );
+		$this->assertSame( 1, $state['stats']['failed'] );
+		$this->assertSame( 4, $state['stats']['converted'] ); // +1.
+		$this->assertSame( 2, $state['stats']['missing'] ); // unchanged -- a fix doesn't change the run's total attempted count.
+		$this->assertSame( 5, $state['total_missing'] ); // unchanged too.
+	}
+
+	public function test_remove_failure_from_state_shrinks_missing_and_total_missing_when_deleted() {
+		$this->transients['wwg_job_state'] = $this->running_state(
+			array(
+				'stats' => array(
+					'scanned'        => 5,
+					'missing'        => 2,
+					'converted'      => 3,
+					'failed'         => 1,
+					'original_bytes' => 0,
+					'webp_bytes'     => 0,
+					'avif_bytes'     => 0,
+					'failures'       => array(
+						array( 'file' => '2024/01/a.jpg', 'format' => 'webp', 'error' => 'x' ),
+					),
+				),
+				'total_missing' => 5,
+			)
+		);
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		$job->remove_failure_from_state( '2024/01/a.jpg', 'webp', false );
+
+		$state = $this->transients['wwg_job_state'];
+		$this->assertSame( array(), $state['stats']['failures'] );
+		$this->assertSame( 0, $state['stats']['failed'] );
+		$this->assertSame( 3, $state['stats']['converted'] ); // unchanged -- not a fix.
+		$this->assertSame( 1, $state['stats']['missing'] ); // -1.
+		$this->assertSame( 4, $state['total_missing'] ); // -1.
+	}
+
+	public function test_remove_failure_from_state_with_null_format_clears_every_format_of_the_file_at_once() {
+		$this->transients['wwg_job_state'] = $this->running_state(
+			array(
+				'stats' => array(
+					'scanned'        => 5,
+					'missing'        => 2,
+					'converted'      => 0,
+					'failed'         => 2,
+					'original_bytes' => 0,
+					'webp_bytes'     => 0,
+					'avif_bytes'     => 0,
+					'failures'       => array(
+						array( 'file' => '2024/01/a.jpg', 'format' => 'webp', 'error' => 'x' ),
+						array( 'file' => '2024/01/a.jpg', 'format' => 'avif', 'error' => 'y' ),
+					),
+				),
+				'total_missing' => 5,
+			)
+		);
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		// Mirrors delete_failure_file()'s call convention -- the source
+		// file is gone, so every format's record for it is moot at once,
+		// not just one.
+		$job->remove_failure_from_state( '2024/01/a.jpg', null, false );
+
+		$state = $this->transients['wwg_job_state'];
+		$this->assertSame( array(), $state['stats']['failures'] );
+		$this->assertSame( 0, $state['stats']['failed'] );
+		$this->assertSame( 0, $state['stats']['missing'] ); // both units removed.
+		$this->assertSame( 3, $state['total_missing'] ); // -2.
+	}
+
+	public function test_remove_failure_from_state_with_a_specific_format_leaves_the_other_format_of_the_same_file_alone() {
+		$this->transients['wwg_job_state'] = $this->running_state(
+			array(
+				'stats' => array(
+					'scanned'        => 5,
+					'missing'        => 2,
+					'converted'      => 0,
+					'failed'         => 2,
+					'original_bytes' => 0,
+					'webp_bytes'     => 0,
+					'avif_bytes'     => 0,
+					'failures'       => array(
+						array( 'file' => '2024/01/a.jpg', 'format' => 'webp', 'error' => 'x' ),
+						array( 'file' => '2024/01/a.jpg', 'format' => 'avif', 'error' => 'y' ),
+					),
+				),
+			)
+		);
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		$job->remove_failure_from_state( '2024/01/a.jpg', 'webp', true );
+
+		$state = $this->transients['wwg_job_state'];
+		$this->assertCount( 1, $state['stats']['failures'] );
+		$this->assertSame( 'avif', $state['stats']['failures'][0]['format'] );
+		$this->assertSame( 1, $state['stats']['failed'] );
+		$this->assertSame( 1, $state['stats']['converted'] );
+	}
+
+	public function test_remove_failure_from_state_treats_a_pre_avif_entry_with_no_format_key_as_webp() {
+		$this->transients['wwg_job_state'] = $this->running_state(
+			array(
+				'stats' => array(
+					'scanned'        => 5,
+					'missing'        => 1,
+					'converted'      => 0,
+					'failed'         => 1,
+					'original_bytes' => 0,
+					'webp_bytes'     => 0,
+					'avif_bytes'     => 0,
+					// No 'format' key -- exactly what a job paused right
+					// at the upgrade boundary could still be holding.
+					'failures'       => array(
+						array( 'file' => '2024/01/old.jpg', 'error' => 'x' ),
+					),
+				),
+			)
+		);
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		$job->remove_failure_from_state( '2024/01/old.jpg', 'webp', true );
+
+		$state = $this->transients['wwg_job_state'];
+		$this->assertSame( array(), $state['stats']['failures'] );
+		$this->assertSame( 1, $state['stats']['converted'] );
+	}
+
+	public function test_remove_failure_from_state_is_a_noop_when_the_file_is_not_in_this_runs_failures() {
+		$original_state                    = $this->running_state(
+			array(
+				'stats' => array(
+					'scanned'        => 5,
+					'missing'        => 1,
+					'converted'      => 0,
+					'failed'         => 1,
+					'original_bytes' => 0,
+					'webp_bytes'     => 0,
+					'avif_bytes'     => 0,
+					'failures'       => array(
+						array( 'file' => '2024/01/a.jpg', 'format' => 'webp', 'error' => 'x' ),
+					),
+				),
+			)
+		);
+		$this->transients['wwg_job_state'] = $original_state;
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		// Only ever in the Library Status snapshot, not this run's own record.
+		$job->remove_failure_from_state( '2024/01/somewhere-else.jpg', 'webp', true );
+
+		$this->assertSame( $original_state, $this->transients['wwg_job_state'] );
 	}
 }

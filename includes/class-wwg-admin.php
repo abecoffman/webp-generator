@@ -59,10 +59,17 @@ class WWG_Admin {
 
 	/**
 	 * Option holding a dir_rel => value map of folders already confirmed
-	 * to have nothing further to do, as of that value's mtime. The value
-	 * is either a bare mtime int (the common case: zero images missing a
-	 * .webp sibling), or -- see OPTION_KNOWN_FAILURES -- an
-	 * {mtime, known_failures} array when the only missing images are
+	 * to have nothing further to do, as of that value's mtime, for a
+	 * specific set of enabled formats. The value is either a bare mtime
+	 * int (a pre-AVIF entry -- only WebP could have been considered), or
+	 * an {mtime, formats, known_failures?} array -- `formats` records
+	 * which enabled format ids were actually checked when this was
+	 * cached, so a format gaining server support later (or a
+	 * wwg_enabled_formats filter loosening) correctly invalidates a
+	 * folder that's still genuinely clean for the formats it already knew
+	 * about (see is_known_clean()'s format-staleness check); `known_
+	 * failures`, if present, is a list of {file, format} pairs -- see
+	 * OPTION_KNOWN_FAILURES -- when the only missing conversions are
 	 * known, already-confirmed-stable failures. Shared between scan and
 	 * convert -- "this folder has nothing [further] missing" is the same
 	 * fact regardless of which mode discovered it. Either mode can now
@@ -80,18 +87,25 @@ class WWG_Admin {
 	const OPTION_CLEAN_DIRS = 'wwg_clean_dirs';
 
 	/**
-	 * Option holding a file_rel => {size, mtime, error} map of individual
-	 * files known to permanently fail conversion (e.g. a 0-byte file, or
-	 * one with corrupt image data). Convert mode consults this to skip
-	 * straight to reporting the remembered failure instead of re-running
-	 * an expensive, doomed Imagick/GD decode attempt every single run;
-	 * scan mode consults the same record too (it never attempts a real
-	 * decode either way) so a known failure is reported identically no
-	 * matter which tool notices it first, rather than showing up as an
-	 * undifferentiated "missing" count only Convert knows is a lost cause.
+	 * Option holding a file_rel => {size, mtime, formats} map of
+	 * individual source files with at least one derived format known to
+	 * permanently fail conversion (e.g. a 0-byte file, or one with
+	 * corrupt image data) -- formats is a format-id => {error} map (e.g.
+	 * {webp: {...}, avif: {...}}, or just one of the two if only one
+	 * format is currently failing for this file). Convert mode consults
+	 * this to skip straight to reporting the remembered failure instead
+	 * of re-running an expensive, doomed Imagick/GD decode attempt every
+	 * single run; scan mode consults the same record too (it never
+	 * attempts a real decode either way) so a known failure is reported
+	 * identically no matter which tool notices it first, rather than
+	 * showing up as an undifferentiated "missing" count only Convert
+	 * knows is a lost cause. A record written before AVIF existed has no
+	 * `formats` key at all -- read forever, not migrated, as {webp:
+	 * {error: <the old top-level error>}} (see formats_of()), since
+	 * WebP was the only format that could possibly have failed then.
 	 * Self-invalidates the same way OPTION_CLEAN_DIRS does: if the file's
-	 * size/mtime ever change, it's stale and gets a real re-attempt (see
-	 * is_known_failure()).
+	 * size/mtime ever change, every format's record for it is discarded
+	 * and it gets a real re-attempt (see is_known_failure()).
 	 *
 	 * A folder isn't excluded from OPTION_CLEAN_DIRS just because it
 	 * contains a known failure -- once a failure has been reconfirmed
@@ -121,8 +135,14 @@ class WWG_Admin {
 	 * that a resumable in-progress state isn't needed -- this only ever
 	 * holds the result of a scan that actually finished.
 	 *
-	 * Shape: {missing, original_bytes, failures[], finished_at,
-	 * invalidated_at}. Self-invalidates on the specific event that makes
+	 * Shape: {missing, missing_files, original_bytes, failures[],
+	 * finished_at, invalidated_at}. "missing" counts (file, format)
+	 * conversion units still needed (what the progress bar tracks against);
+	 * "missing_files" counts distinct files needing at least one of them
+	 * (what the headline sentence reports) -- a file needing both WebP and
+	 * AVIF counts once in missing_files but twice in missing. Each
+	 * failures[] entry is {file, format, error}. Self-invalidates on the
+	 * specific event that makes
 	 * it wrong (a Generate run that actually converts something -- see
 	 * mark_scan_state_stale(), called from WWG_Job) rather than a bare
 	 * TTL, so it never silently goes stale while still claiming to be
@@ -200,6 +220,10 @@ class WWG_Admin {
 		if ( isset( $_POST['wwg_quality'] ) ) {
 			$quality = max( 1, min( 100, absint( $_POST['wwg_quality'] ) ) );
 			update_option( WWG_Generator::OPTION_QUALITY, $quality );
+		}
+		if ( isset( $_POST['wwg_quality_avif'] ) ) {
+			$quality = max( 1, min( 100, absint( $_POST['wwg_quality_avif'] ) ) );
+			update_option( WWG_Format::OPTION_QUALITY_AVIF, $quality );
 		}
 
 		wp_safe_redirect(
@@ -284,6 +308,12 @@ class WWG_Admin {
 			true
 		);
 
+		$enabled_formats = WWG_Format::enabled();
+		$format_labels   = array();
+		foreach ( $enabled_formats as $format ) {
+			$format_labels[ $format ] = WWG_Format::label( $format );
+		}
+
 		wp_localize_script(
 			'wwg-admin',
 			'wwgAdmin',
@@ -303,6 +333,13 @@ class WWG_Admin {
 					'cancel' => WWG_Job::ACTION_CANCEL,
 					'drive'  => WWG_Job::ACTION_DRIVE,
 				),
+				// Enabled-format ids in priority order, with their display
+				// labels -- e.g. {avif: "AVIF", webp: "WebP"} on a server
+				// that supports both. admin.js uses this to build both-
+				// format-aware copy/stat tiles without hardcoding "WebP"/
+				// "AVIF" anywhere client-side.
+				'enabledFormats' => $enabled_formats,
+				'formatLabels'   => $format_labels,
 				'strings'        => self::get_strings(),
 			)
 		);
@@ -318,8 +355,31 @@ class WWG_Admin {
 	 * @return array<string,string>
 	 */
 	public static function get_strings() {
+		// WWG_Format::PRIORITY is avif-first (best format wins in the
+		// rewrite rule); reversed here purely because "WebP and AVIF"
+		// reads as natural English where "AVIF and WebP" doesn't -- this
+		// ordering has no bearing on anything but these sentences.
+		$labels         = array_reverse( wp_list_pluck( WWG_Format::all(), 'label' ) );
+		$enabled_labels = array_intersect_key( $labels, array_flip( WWG_Format::enabled() ) );
+		// Falls back to "WebP" in the (Scan/Generate-disabled) edge case
+		// where nothing is enabled at all -- these strings only ever
+		// actually get shown once at least one format is enabled, but
+		// must still resolve to *something* rather than an empty phrase.
+		if ( empty( $enabled_labels ) ) {
+			$enabled_labels = array( WWG_Format::WEBP => WWG_Format::label( WWG_Format::WEBP ) );
+		}
+		/* translators: the word joining two format names in a sentence, e.g. "WebP _and_ AVIF" -- only used when more than one format is enabled. */
+		$and_join = __( 'and', 'webp-generator' );
+		/* translators: the word joining two format names in a sentence, e.g. "WebP _or_ AVIF" -- only used when more than one format is enabled. */
+		$or_join = __( 'or', 'webp-generator' );
+		// "has/generates a WebP AND AVIF version" (every enabled format);
+		// "is missing a WebP OR AVIF version" (at least one of them).
+		$format_and = implode( ' ' . $and_join . ' ', $enabled_labels );
+		$format_or  = implode( ' ' . $or_join . ' ', $enabled_labels );
+
 		return array(
-			'confirmGenerate'              => __( 'Generate .webp versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'webp-generator' ),
+			/* translators: %s: format name(s) that will be generated, e.g. "WebP" or "WebP and AVIF". */
+			'confirmGenerate'              => sprintf( __( 'Generate %s versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'webp-generator' ), $format_and ),
 			// Static label for Region 1's status chip in its idle/done
 			// substates -- while actively scanning, admin.js swaps the
 			// chip to scanningLabel below instead.
@@ -334,7 +394,8 @@ class WWG_Admin {
 			// (see 'notCheckedYetFirstTime'/'notCheckedYetInvalidated' for
 			// which meta line pairs with this).
 			'notCheckedYet'                => __( 'Not checked yet.', 'webp-generator' ),
-			'notCheckedYetFirstTime'       => __( 'Click Scan to see how many images need a .webp version.', 'webp-generator' ),
+			/* translators: %s: format name(s), e.g. "WebP" or "WebP or AVIF". */
+			'notCheckedYetFirstTime'       => sprintf( __( 'Click Scan to see how many images need a %s version.', 'webp-generator' ), $format_or ),
 			// Shown instead of the above once a Generate run has actually
 			// changed the library since the last scan (see
 			// WWG_Admin::mark_scan_state_stale(), called from WWG_Job) --
@@ -352,11 +413,12 @@ class WWG_Admin {
 			'generatedSoFar'               => __( '%d images generated so far…', 'webp-generator' ),
 			/* translators: %d: number of images generated. Shown once every missing image Scan found has been processed -- unlike 'generatedSoFar' above, this is the final count for this run (only the "finishing folder scan" walk is left, which won't change it further), so it deliberately doesn't say "so far". */
 			'generatedFinal'               => __( '%d image(s) generated.', 'webp-generator' ),
-			'missingNone'                  => __( 'Every image already has a .webp version.', 'webp-generator' ),
-			/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB". */
-			'missingPlural'                => __( '%1$d images are missing a .webp version (%2$s).', 'webp-generator' ),
-			/* translators: 1: combined file size, e.g. "420 KB". */
-			'missingSingular'              => __( '1 image is missing a .webp version (%2$s).', 'webp-generator' ),
+			/* translators: %s: format name(s), e.g. "WebP" or "WebP and AVIF". */
+			'missingNone'                  => sprintf( __( 'Every image already has a %s version.', 'webp-generator' ), $format_and ),
+			/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB", 3: format name(s), e.g. "WebP or AVIF". */
+			'missingPlural'                => sprintf( __( '%%1$d images are missing a %s version (%%2$s).', 'webp-generator' ), $format_or ),
+			/* translators: 1: combined file size, e.g. "420 KB", 2: format name(s), e.g. "WebP or AVIF". */
+			'missingSingular'              => sprintf( __( '1 image is missing a %s version (%%2$s).', 'webp-generator' ), $format_or ),
 			// Appended after missingSingular/missingPlural above, only when
 			// some (or all) of that same missing count is already known --
 			// from an earlier run -- to permanently fail. Deliberately its
@@ -404,6 +466,15 @@ class WWG_Admin {
 			'resumeGenerating'             => __( 'Resume Generating', 'webp-generator' ),
 			'paused'                       => __( 'Paused. Click "Resume Generating" to pick up where this left off.', 'webp-generator' ),
 			'vsOriginal'                   => __( 'vs.', 'webp-generator' ),
+			// Region 3's stats-tile label, built client-side in admin.js
+			// (renderBytesTiles()): 'newSizeVsOriginals' on a server
+			// producing only one format (matches this page's original,
+			// unlabelled single-format wording exactly); 'vsOriginals'
+			// (no "New size" prefix -- a format badge sits in front of it
+			// instead) once more than one format is active, one tile per
+			// format.
+			'newSizeVsOriginals'           => __( 'New size vs. originals', 'webp-generator' ),
+			'vsOriginals'                  => __( 'vs. originals', 'webp-generator' ),
 			'folders'                      => __( 'folders', 'webp-generator' ),
 			'images'                       => __( 'images', 'webp-generator' ),
 			'viewResults'                  => __( 'View results →', 'webp-generator' ),
@@ -436,15 +507,32 @@ class WWG_Admin {
 	 * live UI lives below this in includes/views/admin-page.php.
 	 */
 	public function render_page() {
+		$enabled = WWG_Format::enabled();
+
 		$readiness = array(
-			'has_webp_support'   => $this->generator->has_webp_support(),
-			'quality'            => $this->generator->get_quality(),
-			'can_auto_install'   => WWG_Htaccess::can_auto_install(),
-			'htaccess_installed' => WWG_Htaccess::is_installed(),
-			'htaccess_path'      => WWG_Htaccess::get_path(),
-			'server_type'        => WWG_Htaccess::detect_server(),
-			'server_doc_link'    => WWG_Htaccess::get_server_doc_link(),
+			'formats'             => array(),
+			'can_auto_install'    => WWG_Htaccess::can_auto_install(),
+			'htaccess_installed'  => WWG_Htaccess::is_installed(),
+			// Only meaningful once htaccess_installed is true -- see
+			// WWG_Htaccess::is_up_to_date()'s own docblock for why a
+			// perfectly valid, working rule can still go stale (a host
+			// gaining AVIF support after the rule was installed).
+			'htaccess_up_to_date' => WWG_Htaccess::is_up_to_date(),
+			'htaccess_path'       => WWG_Htaccess::get_path(),
+			'server_type'         => WWG_Htaccess::detect_server(),
+			'server_doc_link'     => WWG_Htaccess::get_server_doc_link(),
 		);
+
+		foreach ( WWG_Format::all() as $id => $def ) {
+			$readiness['formats'][ $id ] = array(
+				'id'          => $id,
+				'label'       => $def['label'],
+				'supported'   => WWG_Format::has_support( $id ),
+				'enabled'     => in_array( $id, $enabled, true ),
+				'quality'     => $this->generator->get_quality( $id ),
+				'option_name' => $def['quality_option'],
+			);
+		}
 
 		require WWG_PATH . 'includes/views/admin-page.php';
 	}
@@ -515,9 +603,11 @@ class WWG_Admin {
 				// for length any more than for content.
 				foreach ( array_slice( $decoded, -500 ) as $failure ) {
 					if ( isset( $failure['file'], $failure['error'] ) && is_string( $failure['file'] ) && is_string( $failure['error'] ) ) {
+						$format     = isset( $failure['format'] ) && is_string( $failure['format'] ) ? sanitize_key( $failure['format'] ) : WWG_Format::WEBP;
 						$failures[] = array(
-							'file'  => sanitize_text_field( $failure['file'] ),
-							'error' => sanitize_text_field( $failure['error'] ),
+							'file'   => sanitize_text_field( $failure['file'] ),
+							'format' => $format,
+							'error'  => sanitize_text_field( $failure['error'] ),
 						);
 					}
 				}
@@ -526,6 +616,7 @@ class WWG_Admin {
 
 		$state = array(
 			'missing'        => isset( $_POST['missing'] ) ? absint( $_POST['missing'] ) : 0,
+			'missing_files'  => isset( $_POST['missing_files'] ) ? absint( $_POST['missing_files'] ) : 0,
 			'original_bytes' => isset( $_POST['original_bytes'] ) ? absint( $_POST['original_bytes'] ) : 0,
 			'failures'       => $failures,
 			'finished_at'    => time(), // Server clock -- never trust a client-sent timestamp.
@@ -549,6 +640,7 @@ class WWG_Admin {
 	private function get_scan_state() {
 		$defaults = array(
 			'missing'        => 0,
+			'missing_files'  => 0,
 			'original_bytes' => 0,
 			'failures'       => array(),
 			'finished_at'    => 0,
@@ -694,6 +786,16 @@ class WWG_Admin {
 	 * not just when a button is actually clicked, since a fresh answer
 	 * matters more here than caching a possibly-stale one.
 	 *
+	 * File-level, not per-format: Fix and Delete both act on every
+	 * currently-failing enabled format of a file together (fixing
+	 * regenerates the shared source derivative once, then re-converts
+	 * every format from it; deleting removes every derived file for the
+	 * source at once) -- there's no separate "fix just the AVIF one"
+	 * action to classify, so callers don't need this to also report
+	 * *which* formats are failing -- they already have that straight from
+	 * the same failures list that put this file in front of them in the
+	 * first place (each entry already carries its own `format`).
+	 *
 	 * @param string $file_rel Relative path under uploads.
 	 * @return array {
 	 *     @type string $action   One of 'fix_or_delete', 'delete_only',
@@ -759,22 +861,36 @@ class WWG_Admin {
 
 	/**
 	 * Regenerate one failed file from its attachment's healthy original,
-	 * then convert the fresh result to .webp. Never touches anything if
-	 * classify_failure() doesn't confirm this file is actually regenerable.
+	 * then convert the fresh result to every currently-enabled derived
+	 * format. Never touches anything if classify_failure() doesn't
+	 * confirm this file is actually regenerable. Fixes every format
+	 * that's still failing in one click -- a corrupt source derivative
+	 * almost always broke every enabled format identically, and re-
+	 * running an already-fine format again is a cheap no-op (its
+	 * ensure_format() short-circuits on the file already existing), so
+	 * there's no separate "fix just this one format" action to offer.
 	 *
 	 * @param string $file_rel Relative path under uploads.
 	 * @return array {outcome, file, message}
 	 */
 	private function fix_failure( $file_rel ) {
 		$abs_path = $this->abs_path_for( $file_rel );
+		$formats  = WWG_Format::enabled();
 
-		// Re-verify server-side this file is actually still broken --
+		// Re-verify server-side which formats are actually still broken --
 		// never trust a possibly-stale client click for something this
-		// consequential. If it's already fine, there's nothing to fix,
-		// just stale bookkeeping to clear.
-		$recheck = $this->generator->ensure_webp( $abs_path );
-		if ( in_array( $recheck['status'], array( 'exists', 'created' ), true ) ) {
-			$this->clear_failure_record( $file_rel, true );
+		// consequential. Anything already fine just needs its stale
+		// bookkeeping cleared, not a real regenerate attempt below.
+		$still_missing = array();
+		foreach ( $this->generator->ensure_formats( $abs_path, $formats ) as $format => $outcome ) {
+			if ( in_array( $outcome['status'], array( 'exists', 'created' ), true ) ) {
+				$this->clear_failure_record( $file_rel, $format, true );
+			} else {
+				$still_missing[] = $format;
+			}
+		}
+
+		if ( empty( $still_missing ) ) {
 			return array(
 				'outcome' => 'fixed',
 				'file'    => $file_rel,
@@ -827,18 +943,25 @@ class WWG_Admin {
 		}
 
 		// image_make_intermediate_size() only produces the JPEG/PNG --
-		// this plugin's whole point is the .webp sibling, which still
-		// needs generating for the freshly-written file.
-		$webp_outcome = $this->generator->ensure_webp( $abs_path );
-		if ( ! in_array( $webp_outcome['status'], array( 'created', 'exists' ), true ) ) {
+		// this plugin's whole point is the derived-format siblings, which
+		// still need generating for the freshly-written file, for every
+		// format the recheck above confirmed is still actually missing.
+		$all_ok = true;
+		foreach ( $this->generator->ensure_formats( $abs_path, $still_missing ) as $format => $outcome ) {
+			if ( in_array( $outcome['status'], array( 'created', 'exists' ), true ) ) {
+				$this->clear_failure_record( $file_rel, $format, true );
+			} else {
+				$all_ok = false;
+			}
+		}
+
+		if ( ! $all_ok ) {
 			return array(
 				'outcome' => 'failed',
 				'file'    => $file_rel,
-				'message' => __( 'The image itself was regenerated, but creating its .webp version still failed. Check your server’s error log, or try again.', 'webp-generator' ),
+				'message' => __( 'The image itself was regenerated, but creating one of its derived versions still failed. Check your server’s error log, or try again.', 'webp-generator' ),
 			);
 		}
-
-		$this->clear_failure_record( $file_rel, true );
 
 		return array(
 			'outcome' => 'fixed',
@@ -848,8 +971,12 @@ class WWG_Admin {
 	}
 
 	/**
-	 * Delete one broken derivative file (or a fully unresolvable one) --
-	 * never the original; see delete_original_attachment() for that.
+	 * Delete one broken source file's derivative(s) (or a fully
+	 * unresolvable file's) -- every derived format still on disk for it,
+	 * not just the one format the clicked row happened to represent,
+	 * since a corrupt/missing source means none of them can be right
+	 * anymore. Never the original itself; see delete_original_attachment()
+	 * for that.
 	 *
 	 * @param string $file_rel Relative path under uploads.
 	 * @return array {outcome, file, message}
@@ -857,13 +984,29 @@ class WWG_Admin {
 	private function delete_failure_file( $file_rel ) {
 		$abs_path = $this->abs_path_for( $file_rel );
 
+		// $abs_path is the broken JPG/PNG derivative itself (e.g. a
+		// corrupt thumbnail size) -- that's the actual "failed
+		// conversion," and the whole reason it's a known failure at all
+		// is that no derived format could be produced from it. Delete it
+		// directly; then, defensively, also clean up any derived-format
+		// file that did manage to get partway written for it (e.g. an
+		// interrupted previous attempt) even though the common case is
+		// there's nothing there.
 		if ( file_exists( $abs_path ) ) {
 			wp_delete_file( $abs_path );
+		}
+		foreach ( array_keys( WWG_Format::all() ) as $format ) {
+			$target = WWG_Format::path_for( $format, $abs_path );
+			if ( $target && file_exists( $target ) ) {
+				wp_delete_file( $target );
+			}
 		}
 
 		// If this resolved to a real attachment size, strip it from the
 		// recorded metadata too -- otherwise WordPress keeps returning a
-		// URL for a file that now 404s.
+		// URL for a file that now 404s. One size entry covers every
+		// format (a size name isn't format-specific -- only the file
+		// extension is), so this needs no per-format loop.
 		$resolved = WWG_Attachment_Resolver::resolve( $file_rel );
 		if ( false === $resolved ) {
 			$resolved = null; // Already gone from disk -- resolve() naturally can't confirm it now; nothing more to clean up on the WordPress side.
@@ -876,7 +1019,7 @@ class WWG_Admin {
 			}
 		}
 
-		$this->clear_failure_record( $file_rel, false );
+		$this->clear_failure_record( $file_rel, null, false );
 
 		return array(
 			'outcome' => 'deleted',
@@ -919,7 +1062,7 @@ class WWG_Admin {
 			}
 			$other = WWG_Attachment_Resolver::resolve( $other_file_rel );
 			if ( false !== $other && (int) $other['attachment_id'] === (int) $attachment_id ) {
-				$this->clear_failure_record( $other_file_rel, false );
+				$this->clear_failure_record( $other_file_rel, null, false );
 			}
 		}
 
@@ -928,7 +1071,7 @@ class WWG_Admin {
 			return $this->generic_action_failure( $file_rel );
 		}
 
-		$this->clear_failure_record( $file_rel, false );
+		$this->clear_failure_record( $file_rel, null, false );
 
 		return array(
 			'outcome' => 'deleted',
@@ -943,35 +1086,51 @@ class WWG_Admin {
 	 * persisted Library Status snapshot, and WWG_Job's own state all in
 	 * sync without requiring a fresh Scan/Generate run to reflect it.
 	 *
-	 * @param string $file_rel Relative path under uploads.
-	 * @param bool   $fixed    True if regenerated (counts as a fresh
-	 *                         conversion); false if deleted (counts as
-	 *                         removed, not converted).
+	 * @param string      $file_rel Relative path under uploads.
+	 * @param string|null $format   The one format that stopped failing, or
+	 *                               null to clear every format at once
+	 *                               (used by delete, where the source
+	 *                               itself is gone, so every format's
+	 *                               record for it is moot).
+	 * @param bool        $fixed    True if regenerated (counts as a fresh
+	 *                              conversion); false if deleted (counts
+	 *                              as removed, not converted).
 	 */
-	private function clear_failure_record( $file_rel, $fixed ) {
-		$this->forget_failure( $file_rel );
-		$this->remove_failure_from_scan_state( $file_rel, $fixed );
+	private function clear_failure_record( $file_rel, $format, $fixed ) {
+		$this->forget_failure( $file_rel, $format );
+		$this->remove_failure_from_scan_state( $file_rel, $format, $fixed );
 		if ( $this->job ) {
-			$this->job->remove_failure_from_state( $file_rel, $fixed );
+			$this->job->remove_failure_from_state( $file_rel, $format, $fixed );
 		}
 	}
 
 	/**
-	 * @param string $file_rel Relative path.
-	 * @param bool   $fixed    See clear_failure_record().
+	 * @param string      $file_rel Relative path.
+	 * @param string|null $format   See clear_failure_record().
+	 * @param bool        $fixed    See clear_failure_record().
 	 */
-	private function remove_failure_from_scan_state( $file_rel, $fixed ) {
+	private function remove_failure_from_scan_state( $file_rel, $format, $fixed ) {
 		$state = get_option( self::OPTION_SCAN_STATE, array() );
 		if ( ! is_array( $state ) || empty( $state['failures'] ) ) {
 			return;
 		}
 
-		$before            = count( $state['failures'] );
+		$removed_units = 0;
+		$before        = count( $state['failures'] );
+
 		$state['failures'] = array_values(
 			array_filter(
 				$state['failures'],
-				static function ( $failure ) use ( $file_rel ) {
-					return ! isset( $failure['file'] ) || $failure['file'] !== $file_rel;
+				static function ( $failure ) use ( $file_rel, $format, &$removed_units ) {
+					if ( ! isset( $failure['file'] ) || $failure['file'] !== $file_rel ) {
+						return true; // Keep -- a different file entirely.
+					}
+					$entry_format = isset( $failure['format'] ) ? $failure['format'] : WWG_Format::WEBP;
+					if ( null !== $format && $entry_format !== $format ) {
+						return true; // Keep -- this file, but a different format than the one clearing now.
+					}
+					++$removed_units;
+					return false; // Drop.
 				}
 			)
 		);
@@ -980,12 +1139,27 @@ class WWG_Admin {
 			return; // Wasn't listed here -- nothing to adjust.
 		}
 
-		// A fix doesn't change how many images Scan found missing a
-		// .webp -- it just stops being one of the ones that will never
-		// get one. A delete does: the file's gone, so it can't be
-		// "missing" anymore either.
+		// A fix doesn't change how many conversion units Scan found
+		// missing -- it just stops one of them being one that will never
+		// get done. A delete does: that many are just gone, so they can't
+		// be "missing" anymore either. missing_files (the distinct-file
+		// headline count) only drops once this file has no failure entry
+		// left at all, not on every individual format removed from it.
 		if ( ! $fixed ) {
-			$state['missing'] = max( 0, (int) $state['missing'] - 1 );
+			// isset() guards throughout -- a scan-state option written
+			// before AVIF existed has no `missing_files` key at all.
+			$state['missing'] = max( 0, ( isset( $state['missing'] ) ? (int) $state['missing'] : 0 ) - $removed_units );
+
+			$file_still_listed = false;
+			foreach ( $state['failures'] as $failure ) {
+				if ( isset( $failure['file'] ) && $failure['file'] === $file_rel ) {
+					$file_still_listed = true;
+					break;
+				}
+			}
+			if ( ! $file_still_listed ) {
+				$state['missing_files'] = max( 0, ( isset( $state['missing_files'] ) ? (int) $state['missing_files'] : 0 ) - 1 );
+			}
 		}
 
 		update_option( self::OPTION_SCAN_STATE, $state, false );
@@ -1140,23 +1314,25 @@ class WWG_Admin {
 
 	/**
 	 * Whether $dir_rel was already confirmed to have nothing further to
-	 * do -- either zero images missing a .webp sibling, or the only ones
-	 * that are missing are known, still-stable failures (see
-	 * is_known_failure()) -- and nothing invalidating has happened since.
-	 * Cheap in the common "never cached" case -- a single get_option()
-	 * array lookup, no filesystem stat at all.
+	 * do -- either zero images missing an enabled derived format, or the
+	 * only ones that are missing are known, still-stable failures (see
+	 * is_known_failure()) -- for every format currently enabled, and
+	 * nothing invalidating has happened since. Cheap in the common
+	 * "never cached" case -- a single get_option() array lookup, no
+	 * filesystem stat at all.
 	 *
-	 * @param string $dir_rel Relative folder path -- key into the cache.
-	 * @param string $abs_dir Absolute folder path, stat'd only if there's
-	 *                        a cache entry to validate.
+	 * @param string   $dir_rel Relative folder path -- key into the cache.
+	 * @param string   $abs_dir Absolute folder path, stat'd only if
+	 *                          there's a cache entry to validate.
+	 * @param string[] $formats Currently-enabled format ids (WWG_Format::enabled()).
 	 * @return array|false False if not cached, or since invalidated.
 	 *                      Otherwise the (possibly empty) list of
-	 *                      known-failure file_rels this folder's clean
+	 *                      {file, format} pairs this folder's clean
 	 *                      status depends on -- the caller still needs to
 	 *                      report those every run, just without re-
 	 *                      walking the rest of the folder to find them.
 	 */
-	private function is_known_clean( $dir_rel, $abs_dir ) {
+	private function is_known_clean( $dir_rel, $abs_dir, array $formats ) {
 		$clean_dirs = get_option( self::OPTION_CLEAN_DIRS, array() );
 
 		if ( ! isset( $clean_dirs[ $dir_rel ] ) ) {
@@ -1174,12 +1350,37 @@ class WWG_Admin {
 		// Entries from before known-failures could be cached alongside a
 		// folder are a bare mtime int (there was never anything else to
 		// store) -- tolerate reading that shape indefinitely rather than
-		// forcing a one-time migration.
+		// forcing a one-time migration. Same for entries with no
+		// `formats` key at all (written before AVIF existed) -- only
+		// WebP could have been considered when they were cached.
 		$mtime          = is_array( $entry ) ? $entry['mtime'] : $entry;
+		$cached_formats = is_array( $entry ) && ! empty( $entry['formats'] ) ? $entry['formats'] : array( WWG_Format::WEBP );
 		$known_failures = is_array( $entry ) && ! empty( $entry['known_failures'] ) ? $entry['known_failures'] : array();
+
+		// A format enabled now that wasn't accounted for when this folder
+		// was last verified clean (this server only just gained AVIF
+		// support, or a wwg_enabled_formats filter loosened) means this
+		// folder's "nothing further to do" fact is stale for that format
+		// specifically, even though nothing about the folder's own
+		// contents changed -- force a real recheck rather than silently
+		// never generating the new format for anything already cached.
+		if ( array_diff( $formats, $cached_formats ) ) {
+			return false;
+		}
 
 		if ( filemtime( $abs_dir ) !== $mtime ) {
 			return false;
+		}
+
+		// Normalize each dependency to {file, format} -- entries cached
+		// before AVIF existed are bare file_rel strings (only WebP could
+		// have been meant).
+		$normalized = array();
+		foreach ( $known_failures as $item ) {
+			$normalized[] = is_array( $item ) ? $item : array(
+				'file'   => $item,
+				'format' => WWG_Format::WEBP,
+			);
 		}
 
 		// The directory's own mtime only catches files being added,
@@ -1189,31 +1390,36 @@ class WWG_Admin {
 		// of the whole folder) re-validate each one before trusting the
 		// skip below, so a since-fixed file can never be masked forever
 		// just because the rest of the folder never changed.
-		foreach ( $known_failures as $file_rel ) {
-			if ( false === $this->is_known_failure( $file_rel, $abs_dir . '/' . basename( $file_rel ) ) ) {
+		foreach ( $normalized as $item ) {
+			if ( false === $this->is_known_failure( $item['file'], $abs_dir . '/' . basename( $item['file'] ), $item['format'] ) ) {
 				return false;
 			}
 		}
 
-		return $known_failures;
+		return $normalized;
 	}
 
 	/**
 	 * Record $dir_rel as clean (optionally "clean except these known,
-	 * already-confirmed-stable failures") as of its current mtime. Call
-	 * only after a single process_batch() call has just verified every
-	 * file in the folder in one pass -- see process_batch()'s
-	 * $became_clean check.
+	 * already-confirmed-stable failures") as of its current mtime, for
+	 * the formats that were actually considered this pass. Call only
+	 * after a single process_batch() call has just verified every file
+	 * in the folder in one pass -- see process_batch()'s $became_clean
+	 * check.
 	 *
-	 * @param string   $dir_rel             Relative folder path.
-	 * @param string   $abs_dir             Absolute folder path.
-	 * @param string[] $known_failure_rels  file_rels of known failures
-	 *                                      (already reconfirmed stable
-	 *                                      this same pass, not freshly
-	 *                                      discovered) this folder's
-	 *                                      clean status depends on.
+	 * @param string $dir_rel        Relative folder path.
+	 * @param string $abs_dir        Absolute folder path.
+	 * @param string[] $formats      Currently-enabled format ids this
+	 *                                pass actually checked -- see
+	 *                                is_known_clean()'s format-staleness
+	 *                                check for why this must be recorded,
+	 *                                not just the folder's mtime.
+	 * @param array[]  $known_failures {file, format} pairs (already
+	 *                                reconfirmed stable this same pass,
+	 *                                not freshly discovered) this folder's
+	 *                                clean status depends on.
 	 */
-	private function mark_known_clean( $dir_rel, $abs_dir, array $known_failure_rels = array() ) {
+	private function mark_known_clean( $dir_rel, $abs_dir, array $formats, array $known_failures = array() ) {
 		if ( ! is_dir( $abs_dir ) ) {
 			// Vanished between the file listing and here (rare race) --
 			// nothing meaningful to fingerprint.
@@ -1226,31 +1432,53 @@ class WWG_Admin {
 		}
 
 		$clean_dirs = get_option( self::OPTION_CLEAN_DIRS, array() );
-		// Keep storing the plain mtime int for the common (zero known
-		// failures) case -- smaller, and identical to every entry written
-		// before this feature existed; only step up to the richer shape
-		// when there's actually something extra to remember.
-		$clean_dirs[ $dir_rel ] = $known_failure_rels
-			? array(
-				'mtime'          => $mtime,
-				'known_failures' => array_values( $known_failure_rels ),
-			)
-			: $mtime;
+		$entry      = array(
+			'mtime'   => $mtime,
+			'formats' => $formats,
+		);
+		if ( $known_failures ) {
+			$entry['known_failures'] = array_values( $known_failures );
+		}
+		$clean_dirs[ $dir_rel ] = $entry;
 		update_option( self::OPTION_CLEAN_DIRS, $clean_dirs, false );
 	}
 
 	/**
-	 * Whether $file_rel was already confirmed to fail conversion, and its
-	 * size/mtime haven't changed since -- mirrors is_known_clean()'s
-	 * self-invalidation approach at file granularity instead of folder.
+	 * Normalizes one OPTION_KNOWN_FAILURES entry's per-format failures,
+	 * reading a pre-AVIF flat {size, mtime, error} record (no `formats`
+	 * key at all) as if it had always been {..., formats: {webp: {error}}}
+	 * -- the only format that could possibly have failed before AVIF
+	 * existed. Never rewrites the stored option; this is a read-time
+	 * interpretation only.
+	 *
+	 * @param array $entry One OPTION_KNOWN_FAILURES value.
+	 * @return array<string,array{error:string}> format id => {error}.
+	 */
+	private static function formats_of( $entry ) {
+		if ( isset( $entry['formats'] ) && is_array( $entry['formats'] ) ) {
+			return $entry['formats'];
+		}
+		if ( isset( $entry['error'] ) ) {
+			return array( WWG_Format::WEBP => array( 'error' => $entry['error'] ) );
+		}
+		return array();
+	}
+
+	/**
+	 * Whether $file_rel was already confirmed to fail conversion for
+	 * $format specifically, and its size/mtime haven't changed since --
+	 * mirrors is_known_clean()'s self-invalidation approach at file
+	 * granularity instead of folder.
 	 *
 	 * @param string $file_rel    Relative path -- key into the cache.
 	 * @param string $source_path Absolute path, stat'd only if there's a
 	 *                            cache entry to validate.
-	 * @return array|false The remembered {size, mtime, error} entry if the
-	 *                      fingerprint still matches, false otherwise.
+	 * @param string $format      One of WWG_Format::WEBP/WWG_Format::AVIF.
+	 * @return array|false {size, mtime, error} for this format if the
+	 *                      fingerprint still matches and this format is
+	 *                      among its remembered failures, false otherwise.
 	 */
-	private function is_known_failure( $file_rel, $source_path ) {
+	private function is_known_failure( $file_rel, $source_path, $format ) {
 		$known = get_option( self::OPTION_KNOWN_FAILURES, array() );
 
 		if ( ! isset( $known[ $file_rel ] ) || ! file_exists( $source_path ) ) {
@@ -1263,31 +1491,55 @@ class WWG_Admin {
 			return false; // Fingerprint changed -- something touched the file, so re-attempt for real.
 		}
 
-		return $entry;
+		$formats = self::formats_of( $entry );
+		if ( ! isset( $formats[ $format ] ) ) {
+			return false;
+		}
+
+		return array(
+			'size'  => $entry['size'],
+			'mtime' => $entry['mtime'],
+			'error' => $formats[ $format ]['error'],
+		);
 	}
 
 	/**
-	 * Record $file_rel as failing, fingerprinted to its current size/mtime
-	 * so a later real change to the file is detected and re-attempted.
+	 * Record $file_rel as failing $format, fingerprinted to its current
+	 * size/mtime so a later real change to the file is detected and every
+	 * format re-attempted. Other formats already remembered as failing
+	 * for this exact same fingerprint are preserved alongside the new
+	 * one; a changed fingerprint discards them first -- whatever was
+	 * remembered against the old bytes no longer means anything for any
+	 * format, not just the one just re-attempted.
 	 *
 	 * @param string $file_rel    Relative path.
 	 * @param string $source_path Absolute path.
+	 * @param string $format      One of WWG_Format::WEBP/WWG_Format::AVIF.
 	 * @param string $error       The failure reason to remember and
 	 *                            re-report on future skipped attempts.
 	 */
-	private function remember_failure( $file_rel, $source_path, $error ) {
+	private function remember_failure( $file_rel, $source_path, $format, $error ) {
 		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see is_known_failure() above.
 		$mtime = (int) @filemtime( $source_path );
 		if ( ! $mtime ) {
 			return; // Vanished/unreadable -- nothing meaningful to fingerprint.
 		}
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see is_known_failure() above.
+		$size = (int) @filesize( $source_path );
 
-		$known              = get_option( self::OPTION_KNOWN_FAILURES, array() );
+		$known    = get_option( self::OPTION_KNOWN_FAILURES, array() );
+		$existing = isset( $known[ $file_rel ] ) ? $known[ $file_rel ] : null;
+
+		$formats = ( $existing && (int) $existing['size'] === $size && (int) $existing['mtime'] === $mtime )
+			? self::formats_of( $existing )
+			: array();
+
+		$formats[ $format ] = array( 'error' => $error );
+
 		$known[ $file_rel ] = array(
-			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see is_known_failure() above.
-			'size'  => (int) @filesize( $source_path ),
-			'mtime' => $mtime,
-			'error' => $error,
+			'size'    => $size,
+			'mtime'   => $mtime,
+			'formats' => $formats,
 		);
 		update_option( self::OPTION_KNOWN_FAILURES, $known, false );
 	}
@@ -1295,16 +1547,38 @@ class WWG_Admin {
 	/**
 	 * Stop remembering $file_rel as a failure -- called once it's known to
 	 * no longer be one (a fresh success, including a recovered one, or a
-	 * .webp appearing for it through some other means).
+	 * derived file appearing for it through some other means).
 	 *
-	 * @param string $file_rel Relative path.
+	 * @param string      $file_rel Relative path.
+	 * @param string|null $format   The one format that stopped failing, or
+	 *                              null to forget every format at once
+	 *                              (the source itself is gone).
 	 */
-	private function forget_failure( $file_rel ) {
+	private function forget_failure( $file_rel, $format = null ) {
 		$known = get_option( self::OPTION_KNOWN_FAILURES, array() );
-		if ( isset( $known[ $file_rel ] ) ) {
+		if ( ! isset( $known[ $file_rel ] ) ) {
+			return;
+		}
+
+		if ( null === $format ) {
 			unset( $known[ $file_rel ] );
 			update_option( self::OPTION_KNOWN_FAILURES, $known, false );
+			return;
 		}
+
+		$formats = self::formats_of( $known[ $file_rel ] );
+		if ( ! isset( $formats[ $format ] ) ) {
+			return;
+		}
+		unset( $formats[ $format ] );
+
+		if ( empty( $formats ) ) {
+			unset( $known[ $file_rel ] );
+		} else {
+			$known[ $file_rel ]['formats'] = $formats;
+			unset( $known[ $file_rel ]['error'] ); // Now normalized -- drop any lingering pre-AVIF top-level field.
+		}
+		update_option( self::OPTION_KNOWN_FAILURES, $known, false );
 	}
 
 	/**
@@ -1321,11 +1595,18 @@ class WWG_Admin {
 	private function process_batch( $dirs, $dir_index, $file_offset, $mode ) {
 		$stats = array(
 			'scanned'        => 0,
+			// Distinct files needing >=1 enabled format -- the headline
+			// sentence's count.
+			'missing_files'  => 0,
+			// (file, format) conversion units still needed -- the
+			// progress bar's currency; a file needing both WebP and AVIF
+			// counts once in missing_files but twice here.
 			'missing'        => 0,
 			'converted'      => 0,
 			'failed'         => 0,
 			'original_bytes' => 0,
 			'webp_bytes'     => 0,
+			'avif_bytes'     => 0,
 			'failures'       => array(),
 			'recoveries'     => array(),
 		);
@@ -1341,13 +1622,28 @@ class WWG_Admin {
 			);
 		}
 
+		$formats = WWG_Format::enabled();
+		if ( empty( $formats ) ) {
+			// This server can't actually produce anything -- same "done,
+			// nothing to do" shape as an exhausted $dirs list, without
+			// walking a single folder to discover that.
+			return array(
+				'stats'       => $stats,
+				'dir'         => '',
+				'dir_index'   => count( $dirs ),
+				'file_offset' => 0,
+				'done'        => true,
+				'skipped'     => false,
+			);
+		}
+
 		$dir_rel    = $dirs[ $dir_index ];
 		$upload_dir = wp_get_upload_dir();
 		$abs_dir    = '' === $dir_rel
 			? $upload_dir['basedir']
 			: trailingslashit( $upload_dir['basedir'] ) . $dir_rel;
 
-		$cached_known_failures = $this->is_known_clean( $dir_rel, $abs_dir );
+		$cached_known_failures = $this->is_known_clean( $dir_rel, $abs_dir, $formats );
 		if ( false !== $cached_known_failures ) {
 			// The folder itself isn't walked -- that's the whole point --
 			// but any known failures it depends on must still be reported
@@ -1355,17 +1651,28 @@ class WWG_Admin {
 			// is_known_failure()'s docblock: nothing should silently drop
 			// out of view). is_known_clean() already cheaply re-validated
 			// each of these still matches its remembered fingerprint.
-			foreach ( $cached_known_failures as $file_rel ) {
-				$entry = $this->is_known_failure( $file_rel, $abs_dir . '/' . basename( $file_rel ) );
+			$counted_files = array();
+			foreach ( $cached_known_failures as $item ) {
+				$file_rel = $item['file'];
+				$format   = $item['format'];
+				if ( ! in_array( $format, $formats, true ) ) {
+					continue; // No longer an enabled format -- nothing to report.
+				}
+				$entry = $this->is_known_failure( $file_rel, $abs_dir . '/' . basename( $file_rel ), $format );
 				if ( false === $entry ) {
 					continue; // Shouldn't happen -- is_known_clean() just checked this -- but never trust a stat() race blindly.
 				}
 				++$stats['missing'];
 				++$stats['failed'];
-				$stats['original_bytes'] += $entry['size'];
-				$stats['failures'][]      = array(
-					'file'  => $file_rel,
-					'error' => $entry['error'],
+				if ( ! isset( $counted_files[ $file_rel ] ) ) {
+					$counted_files[ $file_rel ] = true;
+					++$stats['missing_files'];
+					$stats['original_bytes'] += $entry['size'];
+				}
+				$stats['failures'][] = array(
+					'file'   => $file_rel,
+					'format' => $format,
+					'error'  => $entry['error'],
 				);
 			}
 
@@ -1382,51 +1689,75 @@ class WWG_Admin {
 		$files = $this->list_images_in_dir( $abs_dir );
 		$slice = array_slice( $files, $file_offset, self::BATCH_SIZE );
 
-		// Counts real (expensive) ensure_webp() calls this batch only --
+		// Counts real (expensive) ensure_format() calls this batch only --
 		// deliberately separate from $stats['missing'], since a
 		// known-failure shortcut hit below reports as missing/failed too
 		// but does no real decode work, so it must not eat into the cap
 		// that exists specifically to bound that expensive work.
 		$real_attempts = 0;
 
-		// file_rels of known failures reconfirmed via the shortcut below
-		// this same pass -- as opposed to ones failing for the first time
-		// this pass, which $became_clean below must not yet trust.
+		// {file, format} pairs of known failures reconfirmed via the
+		// shortcut below this same pass -- as opposed to ones failing for
+		// the first time this pass, which $became_clean below must not
+		// yet trust.
 		$stable_known_failures = array();
 
 		foreach ( $slice as $filename ) {
 			$source_path = $abs_dir . '/' . $filename;
 			$file_rel    = '' === $dir_rel ? $filename : $dir_rel . '/' . $filename;
-			$webp_path   = preg_replace( '/\.(jpe?g|png)$/i', '.webp', $source_path );
 
-			// Belt-and-suspenders, both modes: a .webp may have appeared
-			// some other way (manual upload, another tool) since a
-			// failure was last remembered for this file -- checked before
-			// the known-failure shortcut so a stale record can never mask
-			// a file that's already actually fine, regardless of which
-			// mode happens to notice first.
-			if ( file_exists( $webp_path ) ) {
+			// Belt-and-suspenders, both modes, per format: a derived file
+			// may have appeared some other way (manual upload, another
+			// tool) since a failure was last remembered for it -- checked
+			// before the known-failure shortcut so a stale record can
+			// never mask a file that's already actually fine, regardless
+			// of which mode happens to notice first.
+			$missing_formats = array();
+			foreach ( $formats as $format ) {
+				$target = WWG_Format::path_for( $format, $source_path );
+				if ( $target && file_exists( $target ) ) {
+					$this->forget_failure( $file_rel, $format );
+				} else {
+					$missing_formats[] = $format;
+				}
+			}
+
+			if ( empty( $missing_formats ) ) {
 				++$stats['scanned'];
-				$this->forget_failure( $file_rel );
 				continue;
 			}
 
-			// Known-failure shortcut, both modes: cheap (a stat, not a
-			// decode), and reported identically in either mode's stats --
-			// a permanent failure doesn't become less permanent because
-			// Scan found it instead of Generate.
-			$known_failure = $this->is_known_failure( $file_rel, $source_path );
-			if ( false !== $known_failure ) {
-				++$stats['scanned'];
-				++$stats['missing'];
-				++$stats['failed'];
-				$stats['original_bytes'] += $known_failure['size'];
-				$stats['failures'][]      = array(
-					'file'  => $file_rel,
-					'error' => $known_failure['error'],
-				);
-				$stable_known_failures[]  = $file_rel;
-				continue; // No real decode attempt -- doesn't touch $real_attempts/the cap below.
+			++$stats['missing_files'];
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish or become unreadable between the directory listing above and this stat() call; (int) cast already turns a false return into a harmless 0.
+			$stats['original_bytes'] += (int) @filesize( $source_path );
+
+			// Known-failure shortcut, both modes, per format: cheap (a
+			// stat, not a decode), and reported identically in either
+			// mode's stats -- a permanent failure doesn't become less
+			// permanent because Scan found it instead of Generate.
+			$pending_formats = array();
+			foreach ( $missing_formats as $format ) {
+				$known_failure = $this->is_known_failure( $file_rel, $source_path, $format );
+				if ( false !== $known_failure ) {
+					++$stats['missing'];
+					++$stats['failed'];
+					$stats['failures'][]     = array(
+						'file'   => $file_rel,
+						'format' => $format,
+						'error'  => $known_failure['error'],
+					);
+					$stable_known_failures[] = array(
+						'file'   => $file_rel,
+						'format' => $format,
+					);
+				} else {
+					$pending_formats[] = $format;
+				}
+			}
+
+			if ( empty( $pending_formats ) ) {
+				++$stats['scanned']; // Every missing format for this file was a known, stable failure -- no real decode attempt needed.
+				continue;
 			}
 
 			if ( 'convert' === $mode ) {
@@ -1437,49 +1768,56 @@ class WWG_Admin {
 				// here). Already-exists files and known-failure shortcuts
 				// above never trip this, so a folder that's mostly or
 				// fully already resolved sails through the whole (much
-				// larger) window in one pass regardless of size.
+				// larger) window in one pass regardless of size. Checked
+				// once per FILE, not per pending format within it -- a
+				// file needing two formats right at the boundary can push
+				// $real_attempts one past the cap, a deliberate trade-off
+				// that keeps "a file is fully processed or not touched
+				// this batch" true, so resumption needs no partial-file
+				// bookkeeping.
 				if ( $real_attempts >= self::MAX_CONVERSIONS_PER_BATCH ) {
 					break;
 				}
-				++$real_attempts;
+				$real_attempts += count( $pending_formats );
 				++$stats['scanned'];
 
-				$outcome = $this->generator->ensure_webp( $source_path );
-
-				if ( 'exists' === $outcome['status'] ) {
-					// Shouldn't normally happen -- the shared file_exists()
-					// check above just confirmed no .webp -- but a race
-					// (something else creating it in between) is possible;
-					// treat it the same as that check would have.
-					$this->forget_failure( $file_rel );
-					continue;
-				}
-
-				++$stats['missing'];
-				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish or become unreadable between the directory listing above and this stat() call; (int) cast already turns a false return into a harmless 0.
-				$stats['original_bytes'] += (int) @filesize( $source_path );
-
-				if ( 'created' === $outcome['status'] ) {
-					++$stats['converted'];
-					$stats['webp_bytes'] += $outcome['webp_bytes'];
-					$this->forget_failure( $file_rel ); // Covers recovered successes too.
-					if ( ! empty( $outcome['recovered'] ) ) {
-						$stats['recoveries'][] = array( 'file' => $file_rel );
+				foreach ( $this->generator->ensure_formats( $source_path, $pending_formats ) as $format => $outcome ) {
+					if ( 'exists' === $outcome['status'] ) {
+						// Shouldn't normally happen -- the shared
+						// file_exists() check above just confirmed this
+						// format was missing -- but a race (something
+						// else creating it in between) is possible; treat
+						// it the same as that check would have.
+						$this->forget_failure( $file_rel, $format );
+						continue;
 					}
-				} else {
-					++$stats['failed'];
-					$error               = isset( $outcome['error'] ) ? $outcome['error'] : '';
-					$stats['failures'][] = array(
-						'file'  => $file_rel,
-						'error' => $error,
-					);
-					$this->remember_failure( $file_rel, $source_path, $error );
+
+					++$stats['missing'];
+
+					if ( 'created' === $outcome['status'] ) {
+						++$stats['converted'];
+						$stats[ $format . '_bytes' ] += $outcome['bytes'];
+						$this->forget_failure( $file_rel, $format ); // Covers recovered successes too.
+						if ( ! empty( $outcome['recovered'] ) ) {
+							$stats['recoveries'][] = array(
+								'file'   => $file_rel,
+								'format' => $format,
+							);
+						}
+					} else {
+						++$stats['failed'];
+						$error               = isset( $outcome['error'] ) ? $outcome['error'] : '';
+						$stats['failures'][] = array(
+							'file'   => $file_rel,
+							'format' => $format,
+							'error'  => $error,
+						);
+						$this->remember_failure( $file_rel, $source_path, $format, $error );
+					}
 				}
 			} else {
 				++$stats['scanned'];
-				++$stats['missing'];
-				// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish or become unreadable between the directory listing above and this stat() call; (int) cast already turns a false return into a harmless 0.
-				$stats['original_bytes'] += (int) @filesize( $source_path );
+				$stats['missing'] += count( $pending_formats );
 			}
 		}
 
@@ -1496,14 +1834,15 @@ class WWG_Admin {
 		// means precisely "this one call covered the folder's entire
 		// file list, start to finish." $stats['missing'] ===
 		// $stats['converted'] + count( $stable_known_failures ) is
-		// mode-agnostic: the known-failure shortcut (and so
+		// mode-agnostic and still holds scaled to conversion units
+		// instead of files: the known-failure shortcut (and so
 		// $stable_known_failures) is shared by both modes, but only
 		// convert mode ever increments $stats['converted'] (scan mode
 		// never attempts a real conversion, so it stays 0 there) -- for
-		// scan mode this reduces to "every missing file is a known,
+		// scan mode this reduces to "every missing unit is a known,
 		// reconfirmed-stable failure"; for convert mode, missing =
 		// converted + failed by construction each batch, so it's
-		// equivalent to "every currently-failed file this pass is a known
+		// equivalent to "every currently-failed unit this pass is a known
 		// one already reconfirmed stable via the shortcut above, not a
 		// fresh first-time failure" -- a folder with any *fresh* failure
 		// is correctly never cached on the pass that discovers it (its
@@ -1512,7 +1851,7 @@ class WWG_Admin {
 		$became_clean = ( 0 === $file_offset ) && $dir_done
 			&& ( $stats['missing'] === $stats['converted'] + count( $stable_known_failures ) );
 		if ( $became_clean ) {
-			$this->mark_known_clean( $dir_rel, $abs_dir, $stable_known_failures );
+			$this->mark_known_clean( $dir_rel, $abs_dir, $formats, $stable_known_failures );
 		}
 
 		return array(

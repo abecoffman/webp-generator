@@ -54,9 +54,16 @@ class AdminFailureActionsTest extends TestCase {
 			}
 		);
 		Functions\when( '__' )->returnArg();
+		// Locks WWG_Format::enabled() to webp-only by default -- this
+		// test machine's real GD genuinely supports both webp and avif
+		// (see FormatTest.php), so every existing single-format test
+		// below needs this to keep meaning exactly what it always did
+		// (matching AdminBatchingTest.php's identical regression-gate
+		// reasoning). The multi-format-specific tests further down
+		// override this per-test.
 		Functions\when( 'apply_filters' )->alias(
 			function ( $tag, $value ) {
-				return $value;
+				return 'wwg_enabled_formats' === $tag ? array( 'webp' ) : $value;
 			}
 		);
 		Functions\when( 'wp_check_filetype' )->alias(
@@ -215,7 +222,7 @@ class AdminFailureActionsTest extends TestCase {
 	public function test_fix_failure_recognizes_an_already_fixed_file() {
 		mkdir( $this->fixture_dir . '/2024/01', 0777, true );
 		touch( $this->fixture_dir . '/2024/01/already-fixed.jpg' );
-		touch( $this->fixture_dir . '/2024/01/already-fixed.webp' ); // .webp already exists -- ensure_webp() short-circuits to 'exists'.
+		touch( $this->fixture_dir . '/2024/01/already-fixed.webp' ); // .webp already exists -- ensure_format() short-circuits to 'exists'.
 
 		$this->options['wwg_known_failures'] = array(
 			'2024/01/already-fixed.jpg' => array( 'size' => 0, 'mtime' => 123, 'error' => 'was broken' ),
@@ -237,6 +244,47 @@ class AdminFailureActionsTest extends TestCase {
 
 		$this->assertSame( 'not_regenerable', $result['outcome'] );
 		$this->assertNotEmpty( $result['message'] );
+	}
+
+	public function test_fix_failure_with_both_formats_enabled_clears_the_one_already_fixed_and_still_refuses_the_other() {
+		// Both formats enabled for this one test -- webp already exists
+		// (some other process fixed it, or it never actually failed),
+		// avif genuinely doesn't and isn't regenerable (unresolvable).
+		Functions\when( 'apply_filters' )->alias(
+			function ( $tag, $value ) {
+				if ( 'wwg_enabled_formats' === $tag ) {
+					return array( 'avif', 'webp' );
+				}
+				return $value;
+			}
+		);
+		Functions\when( 'attachment_url_to_postid' )->justReturn( 0 ); // fully unresolvable.
+
+		mkdir( $this->fixture_dir . '/2024/01', 0777, true );
+		touch( $this->fixture_dir . '/2024/01/partial.jpg' );
+		touch( $this->fixture_dir . '/2024/01/partial.webp' ); // webp already fine; avif is not.
+
+		$this->options['wwg_known_failures'] = array(
+			'2024/01/partial.jpg' => array(
+				'size'    => 0,
+				'mtime'   => 123,
+				'formats' => array(
+					'webp' => array( 'error' => 'was broken' ),
+					'avif' => array( 'error' => 'was broken' ),
+				),
+			),
+		);
+
+		$result = $this->invoke( $this->admin(), 'fix_failure', array( '2024/01/partial.jpg' ) );
+
+		// Not blindly reported "fixed" just because webp's recheck
+		// passed -- avif is still genuinely unresolvable.
+		$this->assertSame( 'not_regenerable', $result['outcome'] );
+		// But webp's own record was still cleared during the recheck,
+		// leaving only avif's behind.
+		$remaining = $this->options['wwg_known_failures']['2024/01/partial.jpg']['formats'];
+		$this->assertArrayNotHasKey( 'webp', $remaining );
+		$this->assertArrayHasKey( 'avif', $remaining );
 	}
 
 	// ---- delete_failure_file() ----
@@ -273,6 +321,57 @@ class AdminFailureActionsTest extends TestCase {
 		$this->assertArrayNotHasKey( '2024/01/to-delete.jpg', $this->options['wwg_known_failures'] );
 		$this->assertSame( array(), $this->options['wwg_scan_state']['failures'] );
 		$this->assertSame( 0, $this->options['wwg_scan_state']['missing'] );
+	}
+
+	public function test_delete_failure_file_clears_both_formats_failure_entries_at_once() {
+		mkdir( $this->fixture_dir . '/2024/01', 0777, true );
+		$path = $this->fixture_dir . '/2024/01/to-delete.jpg';
+		file_put_contents( $path, 'garbage' );
+
+		Functions\when( 'attachment_url_to_postid' )->justReturn( 0 ); // unresolvable -- no metadata cleanup expected.
+		Functions\when( 'wp_delete_file' )->alias(
+			function ( $file ) {
+				if ( file_exists( $file ) ) {
+					unlink( $file );
+				}
+			}
+		);
+
+		$this->options['wwg_known_failures'] = array(
+			'2024/01/to-delete.jpg' => array(
+				'size'    => 7,
+				'mtime'   => 123,
+				'formats' => array(
+					'webp' => array( 'error' => 'broken webp' ),
+					'avif' => array( 'error' => 'broken avif' ),
+				),
+			),
+		);
+		$this->options['wwg_scan_state']     = array(
+			'missing'        => 2,
+			'missing_files'  => 1,
+			'original_bytes' => 7,
+			'failures'       => array(
+				array( 'file' => '2024/01/to-delete.jpg', 'format' => 'webp', 'error' => 'broken webp' ),
+				array( 'file' => '2024/01/to-delete.jpg', 'format' => 'avif', 'error' => 'broken avif' ),
+			),
+			'finished_at'    => 100,
+			'invalidated_at' => null,
+		);
+
+		// delete_failure_file() itself doesn't consult WWG_Format::enabled()
+		// (it deletes the source file plus every KNOWN format's stray
+		// output, regardless of which are currently enabled), so no
+		// wwg_enabled_formats override is needed here -- deleting the one
+		// broken source file is inherently a whole-file action.
+		$result = $this->invoke( $this->admin(), 'delete_failure_file', array( '2024/01/to-delete.jpg' ) );
+
+		$this->assertSame( 'deleted', $result['outcome'] );
+		$this->assertFileDoesNotExist( $path );
+		$this->assertArrayNotHasKey( '2024/01/to-delete.jpg', $this->options['wwg_known_failures'] );
+		$this->assertSame( array(), $this->options['wwg_scan_state']['failures'] );
+		$this->assertSame( 0, $this->options['wwg_scan_state']['missing'] );
+		$this->assertSame( 0, $this->options['wwg_scan_state']['missing_files'] );
 	}
 
 	// ---- delete_original_attachment() ----

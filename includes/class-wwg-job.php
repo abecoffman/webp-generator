@@ -241,7 +241,13 @@ class WWG_Job {
 		);
 		$state['current_dir'] = $result['dir'];
 
-		foreach ( array( 'scanned', 'missing', 'converted', 'failed', 'original_bytes', 'webp_bytes' ) as $key ) {
+		// 'missing_files' (process_batch()'s distinct-file headline count)
+		// is deliberately not merged here -- this job's own progress math
+		// (total_missing/started_at percentage) only ever needs the
+		// conversion-unit numbers below, and merging it too would double-
+		// count it across every batch this run makes rather than tracking
+		// a true running distinct-file total.
+		foreach ( array( 'scanned', 'missing', 'converted', 'failed', 'original_bytes', 'webp_bytes', 'avif_bytes' ) as $key ) {
 			$state['stats'][ $key ] += $result['stats'][ $key ];
 		}
 
@@ -546,26 +552,42 @@ class WWG_Job {
 	 * (e.g. it was only ever in the Library Status snapshot, not a
 	 * completed Generate run's own record).
 	 *
-	 * @param string $file_rel Relative path under uploads.
-	 * @param bool   $fixed    True if regenerated (reclassified from
-	 *                         failed to converted -- the run's total
-	 *                         attempted count doesn't change); false if
-	 *                         deleted (removed from the run's totals
-	 *                         entirely -- it's not "missing" a .webp
-	 *                         anymore, there's nothing left to convert).
+	 * @param string      $file_rel Relative path under uploads.
+	 * @param string|null $format   The one format that stopped failing, or
+	 *                              null to clear every format of this file
+	 *                              at once (the source itself is gone).
+	 * @param bool        $fixed    True if regenerated (reclassified from
+	 *                              failed to converted -- the run's total
+	 *                              attempted count doesn't change); false
+	 *                              if deleted (removed from the run's
+	 *                              totals entirely -- it's not "missing" a
+	 *                              derived version anymore, there's
+	 *                              nothing left to convert).
 	 */
-	public function remove_failure_from_state( $file_rel, $fixed ) {
+	public function remove_failure_from_state( $file_rel, $format, $fixed ) {
 		$state = $this->get_state();
 		if ( empty( $state['stats']['failures'] ) ) {
 			return;
 		}
 
+		$removed_units              = 0;
 		$before                     = count( $state['stats']['failures'] );
 		$state['stats']['failures'] = array_values(
 			array_filter(
 				$state['stats']['failures'],
-				static function ( $failure ) use ( $file_rel ) {
-					return ! isset( $failure['file'] ) || $failure['file'] !== $file_rel;
+				static function ( $failure ) use ( $file_rel, $format, &$removed_units ) {
+					if ( ! isset( $failure['file'] ) || $failure['file'] !== $file_rel ) {
+						return true; // Keep -- a different file entirely.
+					}
+					// A failure entry recorded before AVIF existed has no
+					// `format` key at all -- only WebP could have been
+					// meant then.
+					$entry_format = isset( $failure['format'] ) ? $failure['format'] : WWG_Format::WEBP;
+					if ( null !== $format && $entry_format !== $format ) {
+						return true; // Keep -- this file, but a different format than the one clearing now.
+					}
+					++$removed_units;
+					return false; // Drop.
 				}
 			)
 		);
@@ -574,19 +596,19 @@ class WWG_Job {
 			return; // Wasn't part of this run's own record -- nothing to adjust.
 		}
 
-		$state['stats']['failed'] = max( 0, $state['stats']['failed'] - 1 );
+		$state['stats']['failed'] = max( 0, $state['stats']['failed'] - $removed_units );
 
 		if ( $fixed ) {
-			++$state['stats']['converted'];
+			$state['stats']['converted'] += $removed_units;
 		} else {
-			$state['stats']['missing'] = max( 0, $state['stats']['missing'] - 1 );
+			$state['stats']['missing'] = max( 0, $state['stats']['missing'] - $removed_units );
 			// Keeps the progress bar's processed/target math consistent --
 			// a deleted file was never going to be converted, so it
 			// shouldn't stay counted in what this run originally set out
 			// to do either (otherwise a previously-100%-done run could
 			// show under 100% after a deletion that happened well after
 			// it finished).
-			$state['total_missing'] = max( 0, $state['total_missing'] - 1 );
+			$state['total_missing'] = max( 0, $state['total_missing'] - $removed_units );
 		}
 
 		$this->write_state( $state );
@@ -622,6 +644,7 @@ class WWG_Job {
 				'failed'         => 0,
 				'original_bytes' => 0,
 				'webp_bytes'     => 0,
+				'avif_bytes'     => 0,
 				'failures'       => array(),
 				'recoveries'     => array(),
 			),

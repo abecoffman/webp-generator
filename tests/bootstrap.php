@@ -37,6 +37,7 @@ if ( ! defined( 'WEEK_IN_SECONDS' ) ) {
 }
 
 require_once WWG_PATH . 'includes/class-wwg-cache.php';
+require_once WWG_PATH . 'includes/class-wwg-format.php';
 require_once WWG_PATH . 'includes/class-wwg-generator.php';
 require_once WWG_PATH . 'includes/class-wwg-htaccess.php';
 require_once WWG_PATH . 'includes/class-wwg-attachment-resolver.php';

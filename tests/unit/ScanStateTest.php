@@ -172,8 +172,51 @@ class ScanStateTest extends TestCase {
 		$this->admin()->handle_save_scan_result();
 
 		$this->assertSame( 0, $this->last_json['missing'] );
+		$this->assertSame( 0, $this->last_json['missing_files'] );
 		$this->assertSame( 0, $this->last_json['original_bytes'] );
 		$this->assertSame( array(), $this->last_json['failures'] );
+	}
+
+	public function test_save_scan_result_persists_missing_files_and_per_failure_format() {
+		Functions\when( 'sanitize_key' )->alias(
+			function ( $value ) {
+				return strtolower( preg_replace( '/[^a-z0-9_\-]/i', '', (string) $value ) );
+			}
+		);
+
+		$_POST = array(
+			'missing'        => '2',
+			'missing_files'  => '1', // one file, missing both formats.
+			'original_bytes' => '100',
+			'failures'       => encode_failures_for_post(
+				array(
+					array( 'file' => '2024/01/both.jpg', 'format' => 'avif', 'error' => 'broken avif' ),
+					array( 'file' => '2024/01/both.jpg', 'format' => 'webp', 'error' => 'broken webp' ),
+				)
+			),
+		);
+
+		$this->admin()->handle_save_scan_result();
+
+		$this->assertSame( 1, $this->last_json['missing_files'] );
+		$this->assertSame( 'avif', $this->last_json['failures'][0]['format'] );
+		$this->assertSame( 'webp', $this->last_json['failures'][1]['format'] );
+	}
+
+	public function test_save_scan_result_defaults_a_missing_format_field_to_webp() {
+		// Mirrors what a pre-AVIF admin.js build would have posted --
+		// still handled correctly, not dropped or fatal.
+		$_POST = array(
+			'missing'        => '1',
+			'original_bytes' => '10',
+			'failures'       => encode_failures_for_post(
+				array( array( 'file' => '2024/01/old.jpg', 'error' => 'broken' ) )
+			),
+		);
+
+		$this->admin()->handle_save_scan_result();
+
+		$this->assertSame( 'webp', $this->last_json['failures'][0]['format'] );
 	}
 
 	public function test_a_fresh_scan_result_clears_a_prior_invalidation() {

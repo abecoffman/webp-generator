@@ -9,7 +9,7 @@ use WWG\Tests\TestCase;
 use Brain\Monkey\Functions;
 
 /**
- * Counts real ensure_webp() calls without changing their (real GD/Imagick)
+ * Counts real ensure_format() calls without changing their (real GD/Imagick)
  * behavior -- used by the known-failure-shortcut tests below to prove a
  * skip really skipped the expensive path, without relying on timing.
  */
@@ -21,11 +21,48 @@ class WWG_Generator_Call_Counting_Fake extends \WWG_Generator {
 
 	/**
 	 * @param string $source_path Absolute path to a .jpg/.jpeg/.png file.
+	 * @param string $format      One of WWG_Format::WEBP/WWG_Format::AVIF.
 	 * @return array
 	 */
-	public function ensure_webp( $source_path ) {
+	public function ensure_format( $source_path, $format ) {
 		++$this->calls;
-		return parent::ensure_webp( $source_path );
+		return parent::ensure_format( $source_path, $format );
+	}
+}
+
+/**
+ * A fully-controlled fake for the handful of tests below that need two
+ * formats to diverge (one succeeds, one fails) -- deliberately not real
+ * GD/Imagick output, since faking a genuinely successful conversion needs
+ * real image bytes (out of this lightweight tier's scope, same as
+ * everywhere else in this file); this only needs to prove process_batch()
+ * dispatches and tallies each format's outcome independently, which
+ * doesn't require real bytes at all.
+ */
+class WWG_Generator_Format_Divergent_Fake extends \WWG_Generator {
+	/**
+	 * @param string $source_path Absolute path to a .jpg/.jpeg/.png file.
+	 * @param string $format      One of WWG_Format::WEBP/WWG_Format::AVIF.
+	 * @return array
+	 */
+	public function ensure_format( $source_path, $format ) {
+		if ( \WWG_Format::WEBP === $format ) {
+			// A real ensure_format() always writes the file it reports
+			// 'created' for -- process_batch()'s own file_exists() check
+			// (run before ever calling this) is what makes a second pass
+			// correctly treat webp as already-done instead of re-
+			// attempting it, so this fake must actually write something
+			// too, or that check would never see it.
+			file_put_contents( \WWG_Format::path_for( \WWG_Format::WEBP, $source_path ), 'fake webp bytes' );
+			return array(
+				'status' => 'created',
+				'bytes'  => 500,
+			);
+		}
+		return array(
+			'status' => 'failed',
+			'error'  => 'fake avif failure',
+		);
 	}
 }
 
@@ -113,12 +150,22 @@ class AdminBatchingTest extends TestCase {
 				);
 			}
 		);
-		// Only needed for the convert-mode failure tests -- once both
-		// normal decode attempts fail, ensure_webp() now also runs the
-		// embedded-data recovery attempt, which consults this filter.
+		// Locks WWG_Format::enabled() to webp-only for every test in this
+		// file by default -- this test machine's real GD genuinely
+		// supports both webp and avif (see FormatTest.php), so without
+		// this every test here would suddenly process two formats per
+		// file instead of one. This is deliberate, not a workaround: per
+		// the plan, the rewritten process_batch() must first prove it
+		// still passes every one of these existing single-format cases
+		// unchanged (simulating an AVIF-unsupported environment) before
+		// the multi-format-specific tests further down (which override
+		// this per-test) are trusted. Also covers the convert-mode
+		// failure tests' need for a pass-through wwg_attempt_recovery --
+		// once both normal decode attempts fail, ensure_format() also
+		// runs the embedded-data recovery attempt, which consults it.
 		Functions\when( 'apply_filters' )->alias(
 			function ( $tag, $value ) {
-				return $value;
+				return 'wwg_enabled_formats' === $tag ? array( 'webp' ) : $value;
 			}
 		);
 		Functions\when( 'get_option' )->alias(
@@ -579,6 +626,107 @@ class AdminBatchingTest extends TestCase {
 		$this->assertTrue( $skipped_scan['skipped'] );
 		$this->assertSame( 0, $skipped_scan['stats']['scanned'] );
 		$this->assertSame( 1, $skipped_scan['stats']['failed'] ); // still reported, even though skipped.
+	}
+
+	// ---- Multi-format (AVIF alongside WebP) ----
+	//
+	// Everything above locks WWG_Format::enabled() to webp-only via
+	// set_up()'s apply_filters stub, matching this plugin's pre-AVIF
+	// behavior exactly. These tests override that stub to enable both
+	// formats, covering the parts of process_batch() that only a second
+	// format exercises: per-file/per-format missing-unit counting vs. the
+	// distinct-file headline count, per-format byte tracking, and a
+	// folder's clean-cache correctly going stale for a format it never
+	// considered before.
+
+	/**
+	 * Both formats enabled for the rest of this one test only.
+	 */
+	private function enable_both_formats() {
+		Functions\when( 'apply_filters' )->alias(
+			function ( $tag, $value ) {
+				return 'wwg_enabled_formats' === $tag ? array( 'avif', 'webp' ) : $value;
+			}
+		);
+	}
+
+	public function test_a_file_missing_both_formats_counts_two_missing_units_but_one_missing_file() {
+		$this->enable_both_formats();
+
+		// 2024/01/a.jpg and b.jpg (see set_up()) have neither a .webp nor
+		// an .avif sibling.
+		$dirs   = array( '2024/01' );
+		$result = $this->process_batch( $dirs, 0, 0, 'scan' );
+
+		$this->assertSame( 4, $result['stats']['missing'] ); // 2 files x 2 formats each.
+		$this->assertSame( 2, $result['stats']['missing_files'] ); // still just 2 distinct files.
+	}
+
+	public function test_a_file_already_missing_only_one_format_counts_a_single_missing_unit() {
+		$this->enable_both_formats();
+
+		$dir = $this->fixture_dir . '/2024/15';
+		mkdir( $dir, 0777, true );
+		touch( $dir . '/only-avif-missing.jpg' );
+		touch( $dir . '/only-avif-missing.webp' ); // webp already exists -- only avif is actually missing.
+
+		$dirs   = array( '2024/15' );
+		$result = $this->process_batch( $dirs, 0, 0, 'scan' );
+
+		$this->assertSame( 1, $result['stats']['missing'] );
+		$this->assertSame( 1, $result['stats']['missing_files'] );
+	}
+
+	public function test_converting_a_file_where_one_format_succeeds_and_the_other_fails_tallies_each_independently() {
+		$this->enable_both_formats();
+
+		$dir = $this->fixture_dir . '/2024/16';
+		mkdir( $dir, 0777, true );
+		touch( $dir . '/diverges.jpg' );
+
+		$dirs      = array( '2024/16' );
+		$generator = new \WWG\Tests\Unit\WWG_Generator_Format_Divergent_Fake();
+
+		$result = $this->process_batch( $dirs, 0, 0, 'convert', $generator );
+
+		$this->assertSame( 2, $result['stats']['missing'] );
+		$this->assertSame( 1, $result['stats']['converted'] ); // webp, per the fake.
+		$this->assertSame( 1, $result['stats']['failed'] ); // avif, per the fake.
+		$this->assertSame( 500, $result['stats']['webp_bytes'] );
+		$this->assertSame( 0, $result['stats']['avif_bytes'] );
+
+		$this->assertCount( 1, $result['stats']['failures'] );
+		$this->assertSame( 'avif', $result['stats']['failures'][0]['format'] );
+		$this->assertSame( '2024/16/diverges.jpg', $result['stats']['failures'][0]['file'] );
+
+		// The failure is real bookkeeping, not just this call's return
+		// value -- a second pass should hit the known-failure shortcut
+		// for avif specifically, while webp (already converted) is
+		// skipped as already-existing, not re-attempted either way.
+		$second = $this->process_batch( $dirs, 0, 0, 'convert', $generator );
+		$this->assertSame( 1, $second['stats']['failed'] );
+		$this->assertSame( 0, $second['stats']['converted'] );
+		$this->assertSame( 'avif', $second['stats']['failures'][0]['format'] );
+	}
+
+	public function test_a_folder_cached_clean_under_webp_only_is_rechecked_once_avif_becomes_enabled() {
+		// Cache '2024/03' (e.jpg + e.webp, see set_up()) clean under
+		// today's default (webp-only) stub.
+		$dirs  = array( '2024/03' );
+		$first = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertArrayHasKey( '2024/03', $this->clean_dirs() );
+
+		// Now simulate this server gaining AVIF support (or a
+		// wwg_enabled_formats filter loosening) with nothing about the
+		// folder's own contents having changed at all.
+		$this->enable_both_formats();
+
+		$rechecked = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertFalse( $rechecked['skipped'], 'A format newly enabled since this folder was cached must force a real recheck, not a stale skip.' );
+		$this->assertSame( 1, $rechecked['stats']['scanned'] );
+		// e.jpg is still missing only its .avif now (its .webp already
+		// exists), so exactly one missing unit, not two.
+		$this->assertSame( 1, $rechecked['stats']['missing'] );
 	}
 
 	/**

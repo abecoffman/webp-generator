@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: WebP Generator
- * Description: Generates a .webp sibling for every size of newly uploaded JPEG/PNG images, and can install the Apache .htaccess rule that serves them to browsers that support it (falls back to a manual example for other servers). Also adds a Tools > WebP Generator admin screen to scan the existing media library for images still missing a .webp version and convert them on demand, and clears common page caches (Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, LiteSpeed Cache) when it generates new files.
- * Version:     1.14.0
+ * Description: Generates a WebP sibling -- and an AVIF one too, if your server supports it -- for every size of newly uploaded JPEG/PNG images, and can install the Apache .htaccess rule that serves the best one a browser accepts (falls back to a manual example for other servers). Also adds a Tools > WebP Generator admin screen to scan the existing media library for images still missing a converted version and convert them on demand, and clears common page caches (Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, LiteSpeed Cache) when it generates new files.
+ * Version:     1.15.0
  * Author:      Abe Coffman
  * License:     GPL-2.0-or-later
  * Text Domain: webp-generator
@@ -24,11 +24,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WWG_VERSION', '1.14.0' );
+define( 'WWG_VERSION', '1.15.0' );
 define( 'WWG_PATH', plugin_dir_path( __FILE__ ) );
 define( 'WWG_FILE', __FILE__ );
 
 require_once WWG_PATH . 'includes/class-wwg-cache.php';
+require_once WWG_PATH . 'includes/class-wwg-format.php';
 require_once WWG_PATH . 'includes/class-wwg-generator.php';
 require_once WWG_PATH . 'includes/class-wwg-htaccess.php';
 require_once WWG_PATH . 'includes/class-wwg-attachment-resolver.php';

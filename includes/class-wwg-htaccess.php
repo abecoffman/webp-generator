@@ -133,24 +133,49 @@ class WWG_Htaccess {
 	 * auto-install and the manually-copyable example in the admin page
 	 * render from, so they can't drift apart.
 	 *
+	 * AVIF's RewriteCond/RewriteRule pair comes before WebP's -- best
+	 * format wins when a file has both siblings -- and each is
+	 * independently gated by its own `-f` existence check, so a file with
+	 * only one of the two derived files still falls back correctly to
+	 * whichever it actually has, then to the original if neither exists.
+	 * The AVIF pair (and its AddType) is only ever emitted at all if this
+	 * server can actually encode AVIF -- otherwise it would be dead,
+	 * misleading configuration that can never match a real file, and
+	 * existing single-format installs would gain lines implying a
+	 * capability they don't have.
+	 *
 	 * @return string[]
 	 */
 	public static function get_rule_lines() {
-		return array(
+		$lines = array(
 			'<IfModule mod_rewrite.c>',
 			'    RewriteEngine On',
-			'    RewriteCond %{HTTP_ACCEPT} image/webp',
-			'    RewriteCond %{REQUEST_FILENAME} ^(.+)\.(jpe?g|png)$',
-			'    RewriteCond %1.webp -f',
-			'    RewriteRule ^(wp-content/uploads/.+)\.(jpe?g|png)$ $1.webp [T=image/webp,E=accept:1,L]',
-			'</IfModule>',
-			'<IfModule mod_headers.c>',
-			'    Header append Vary Accept env=accept',
-			'</IfModule>',
-			'<IfModule mod_mime.c>',
-			'    AddType image/webp .webp',
-			'</IfModule>',
 		);
+
+		if ( WWG_Format::has_support( WWG_Format::AVIF ) ) {
+			$lines[] = '    RewriteCond %{HTTP_ACCEPT} image/avif';
+			$lines[] = '    RewriteCond %{REQUEST_FILENAME} ^(.+)\.(jpe?g|png)$';
+			$lines[] = '    RewriteCond %1.avif -f';
+			$lines[] = '    RewriteRule ^(wp-content/uploads/.+)\.(jpe?g|png)$ $1.avif [T=image/avif,E=accept:1,L]';
+		}
+
+		$lines[] = '    RewriteCond %{HTTP_ACCEPT} image/webp';
+		$lines[] = '    RewriteCond %{REQUEST_FILENAME} ^(.+)\.(jpe?g|png)$';
+		$lines[] = '    RewriteCond %1.webp -f';
+		$lines[] = '    RewriteRule ^(wp-content/uploads/.+)\.(jpe?g|png)$ $1.webp [T=image/webp,E=accept:1,L]';
+		$lines[] = '</IfModule>';
+		$lines[] = '<IfModule mod_headers.c>';
+		$lines[] = '    Header append Vary Accept env=accept';
+		$lines[] = '</IfModule>';
+		$lines[] = '<IfModule mod_mime.c>';
+
+		if ( WWG_Format::has_support( WWG_Format::AVIF ) ) {
+			$lines[] = '    AddType image/avif .avif';
+		}
+		$lines[] = '    AddType image/webp .webp';
+		$lines[] = '</IfModule>';
+
+		return $lines;
 	}
 
 	/**
@@ -228,6 +253,31 @@ class WWG_Htaccess {
 		require_once ABSPATH . 'wp-admin/includes/misc.php';
 
 		return (bool) extract_from_markers( self::get_path(), self::MARKER );
+	}
+
+	/**
+	 * Whether an already-installed rule still matches what get_rule_lines()
+	 * would write today. install() only ever writes whatever
+	 * get_rule_lines() returns at the moment it's clicked -- there's no
+	 * automatic re-sync -- so a rule installed before this server gained
+	 * AVIF support (a host upgrading its Imagick/GD build, or before this
+	 * plugin added AVIF at all) can genuinely go stale sitting there,
+	 * still perfectly correctly serving WebP, just silently never
+	 * upgraded to also serve AVIF. Meaningless (and reported as "true":
+	 * nothing to be out of date about) if nothing is installed at all --
+	 * see is_installed() for that question instead.
+	 *
+	 * @return bool
+	 */
+	public static function is_up_to_date() {
+		require_once ABSPATH . 'wp-admin/includes/misc.php';
+
+		$installed = extract_from_markers( self::get_path(), self::MARKER );
+		if ( empty( $installed ) ) {
+			return true;
+		}
+
+		return self::get_rule_lines() === $installed;
 	}
 
 	/**

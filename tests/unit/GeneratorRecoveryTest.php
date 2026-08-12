@@ -9,15 +9,20 @@ use WWG\Tests\TestCase;
 use Brain\Monkey\Functions;
 
 /**
- * Unit-tier coverage for WWG_Generator::ensure_webp()'s newer branches:
+ * Unit-tier coverage for WWG_Generator::ensure_format()'s newer branches:
  * the 0-byte "empty_source" early return, and the embedded-data recovery
  * attempt's offset-search mechanics on the *failure* path -- proving a
  * signature is found (or correctly ignored at offset 0) needs no
  * successful decode at all. A genuinely successful recovery needs real
  * image bytes and a real backend, out of scope for this lightweight tier
- * (see tests/integration/GeneratorIntegrationTest.php for that).
+ * (see tests/integration/GeneratorIntegrationTest.php for that). Format-
+ * agnostic logic (the offset search itself) is only exercised against
+ * 'webp' -- it doesn't branch on format at all, so duplicating every case
+ * against 'avif' too would test nothing new; test_..._works_the_same_for_a_second_format()
+ * below is the one spot-check that a second format really does share this
+ * code path rather than silently having its own copy.
  *
- * @covers \WWG_Generator::ensure_webp
+ * @covers \WWG_Generator::ensure_format
  */
 class GeneratorRecoveryTest extends TestCase {
 
@@ -89,6 +94,7 @@ class GeneratorRecoveryTest extends TestCase {
 
 		$this->created_files[] = $path;
 		$this->created_files[] = preg_replace( '/\.(jpe?g|png)$/i', '.webp', $path );
+		$this->created_files[] = preg_replace( '/\.(jpe?g|png)$/i', '.avif', $path );
 
 		return $path;
 	}
@@ -97,7 +103,7 @@ class GeneratorRecoveryTest extends TestCase {
 		$path = $this->fixture( 'empty.jpg', '' );
 
 		$generator = new \WWG_Generator();
-		$result    = $generator->ensure_webp( $path );
+		$result    = $generator->ensure_format( $path, 'webp' );
 
 		$this->assertSame( 'empty_source', $result['status'] );
 		$this->assertStringContainsString( '0 bytes', $result['error'] );
@@ -108,12 +114,27 @@ class GeneratorRecoveryTest extends TestCase {
 		$path  = $this->fixture( 'corrupt.jpg', $bytes );
 
 		$generator = new \WWG_Generator();
-		$result    = $generator->ensure_webp( $path );
+		$result    = $generator->ensure_format( $path, 'webp' );
 
 		$this->assertSame( 'failed', $result['status'] );
 		$this->assertStringContainsString( 'byte offset 50', $result['error'] );
 		// Never modifies the original file, even though recovery was attempted.
 		$this->assertSame( $bytes, file_get_contents( $path ) );
+	}
+
+	/**
+	 * Spot-check that this same offset-search machinery really is shared
+	 * by a second format, not silently duplicated/diverged for it.
+	 */
+	public function test_recovery_offset_search_works_the_same_for_a_second_format() {
+		$bytes = str_repeat( 'x', 50 ) . "\xFF\xD8\xFF" . str_repeat( 'y', 20 );
+		$path  = $this->fixture( 'corrupt-avif.jpg', $bytes );
+
+		$generator = new \WWG_Generator();
+		$result    = $generator->ensure_format( $path, 'avif' );
+
+		$this->assertSame( 'failed', $result['status'] );
+		$this->assertStringContainsString( 'byte offset 50', $result['error'] );
 	}
 
 	public function test_a_signature_match_at_offset_zero_is_ignored_in_favor_of_a_later_one() {
@@ -124,7 +145,7 @@ class GeneratorRecoveryTest extends TestCase {
 		$path  = $this->fixture( 'corrupt2.jpg', $bytes );
 
 		$generator = new \WWG_Generator();
-		$result    = $generator->ensure_webp( $path );
+		$result    = $generator->ensure_format( $path, 'webp' );
 
 		$this->assertSame( 'failed', $result['status'] );
 		$this->assertStringContainsString( 'byte offset 33', $result['error'] );
@@ -137,11 +158,24 @@ class GeneratorRecoveryTest extends TestCase {
 		$path  = $this->fixture( 'corrupt3.jpg', $bytes );
 
 		$generator = new \WWG_Generator();
-		$result    = $generator->ensure_webp( $path );
+		$result    = $generator->ensure_format( $path, 'webp' );
 
 		$this->assertSame( 'failed', $result['status'] );
 		// No offset-search attempt happened at all -- just the generic
 		// GD/Imagick failure message.
 		$this->assertStringNotContainsString( 'byte offset', $result['error'] );
+	}
+
+	public function test_ensure_format_returns_unsupported_for_an_unrecognized_format_id() {
+		// Never a real call in production (callers only ever pass a
+		// WWG_Format::PRIORITY member), but path_for() -- ensure_format()'s
+		// very first check -- fails closed on it the same way it fails
+		// closed on an unsupported source extension.
+		$path = $this->fixture( 'anything.jpg', str_repeat( 'x', 20 ) );
+
+		$generator = new \WWG_Generator();
+		$result    = $generator->ensure_format( $path, 'heic' );
+
+		$this->assertSame( 'unsupported', $result['status'] );
 	}
 }

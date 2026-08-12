@@ -85,6 +85,7 @@
 		els.progressLabel = els.progress.querySelector( '.wwg-progress-label' );
 		els.summary = document.getElementById( 'wwg-summary' );
 		els.convertResults = document.getElementById( 'wwg-convert-results' );
+		els.cBytesTiles = document.getElementById( 'wwg-c-bytes-tiles' );
 		els.failures = document.getElementById( 'wwg-failures' );
 		els.failuresCount = document.getElementById( 'wwg-failures-count' );
 		els.failuresList = document.getElementById( 'wwg-failures-list' );
@@ -155,11 +156,12 @@
 	function requestSaveScanResult( totals ) {
 		return requestJobAction( wwgAdmin.scanSaveAction, {
 			missing: totals.missing,
+			missing_files: totals.missingFiles,
 			original_bytes: totals.originalBytes,
 			// A JSON string, not repeated form fields -- each entry is a
-			// {file, error} pair, and PHP decodes this the same way it
-			// already treats the rest of this endpoint's input: capped,
-			// sanitized, never trusted length-wise.
+			// {file, format, error} triple, and PHP decodes this the same
+			// way it already treats the rest of this endpoint's input:
+			// capped, sanitized, never trusted length-wise.
 			failures: JSON.stringify( totals.failures.slice( -500 ) ),
 		} );
 	}
@@ -187,25 +189,108 @@
 		el.className = 'wwg-status-chip-label' + ( state && 'idle' !== state ? ' wwg-status-chip-label--' + state : '' );
 	}
 
+	// Groups a flat {file, format, error} list into one entry per file --
+	// Fix/Delete both act on every currently-failing enabled format of a
+	// file together (see WWG_Admin::classify_failure()'s own docblock),
+	// so the UI shows one row per file (with a format badge per entry),
+	// not one row per (file, format) pair, which would show duplicate
+	// buttons that do the exact same thing. Preserves the input's
+	// original first-seen order.
+	function groupFailuresByFile( failures ) {
+		var order = [];
+		var byFile = {};
+		failures.forEach( function ( failure ) {
+			if ( ! byFile[ failure.file ] ) {
+				byFile[ failure.file ] = { file: failure.file, entries: [] };
+				order.push( failure.file );
+			}
+			// A failure entry persisted before AVIF existed has no
+			// `format` field at all -- only WebP could have been meant
+			// then (mirrors WWG_Admin's own formats_of()/
+			// remove_failure_from_scan_state() back-compat reasoning).
+			byFile[ failure.file ].entries.push(
+				failure.format ? failure : Object.assign( {}, failure, { format: 'webp' } )
+			);
+		} );
+		return order.map( function ( file ) {
+			return byFile[ file ];
+		} );
+	}
+
+	function countDistinctFiles( failures ) {
+		var seen = {};
+		var count = 0;
+		failures.forEach( function ( failure ) {
+			if ( ! seen[ failure.file ] ) {
+				seen[ failure.file ] = true;
+				count += 1;
+			}
+		} );
+		return count;
+	}
+
+	function formatLabel( format ) {
+		return ( wwgAdmin.formatLabels && wwgAdmin.formatLabels[ format ] ) || format;
+	}
+
+	function buildFormatBadge( format ) {
+		var span = document.createElement( 'span' );
+		span.className = 'wwg-chip wwg-chip--' + format;
+		span.textContent = formatLabel( format );
+		return span;
+	}
+
+	// Badges only earn their keep once there's more than one format this
+	// site actually produces -- on a single-format server every row would
+	// show the same one badge, uninformative clutter rather than a signal.
+	function shouldShowFormatBadges() {
+		return !! ( wwgAdmin.enabledFormats && wwgAdmin.enabledFormats.length > 1 );
+	}
+
+	// One combined line if every entry in the group shares the same
+	// underlying error (the common case -- one broken source derivative
+	// breaks every format converted from it identically); one line per
+	// distinct error, labelled by format, otherwise -- so a genuine
+	// per-format divergence isn't silently hidden behind whichever entry
+	// happened to render.
+	function summarizeFailureText( group ) {
+		var uniqueErrors = [];
+		group.entries.forEach( function ( entry ) {
+			if ( -1 === uniqueErrors.indexOf( entry.error ) ) {
+				uniqueErrors.push( entry.error );
+			}
+		} );
+		if ( 1 === uniqueErrors.length ) {
+			return uniqueErrors[ 0 ];
+		}
+		return group.entries.map( function ( entry ) {
+			return formatLabel( entry.format ) + ': ' + entry.error;
+		} ).join( ' — ' );
+	}
+
 	// Shared by Region 1's own "Failed conversions" (known failures Scan
 	// re-surfaced) and Region 3's (this Generate run's failures) -- a
 	// failure reads the same regardless of which box is reporting it,
-	// right down to the next-best-action offered on it.
+	// right down to the next-best-action offered on it. $failures is a
+	// flat {file, format, error} list -- grouped by file for display, see
+	// groupFailuresByFile().
 	function renderFailuresInto( listEl, countEl, detailsEl, failures ) {
 		if ( ! failures || ! failures.length ) {
 			detailsEl.hidden = true;
 			return;
 		}
 		detailsEl.hidden = false;
+		// The raw (file, format) unit count -- matches the "%d failed"
+		// summary line elsewhere on the page, which counts the same way.
 		countEl.textContent = failures.length;
 
 		// Keep the DOM light on a run with hundreds of failures -- the
 		// count above already reflects the true total, this list is for
 		// spot-checking specific files, not an exhaustive report.
-		var toShow = failures.slice( -50 );
+		var groups = groupFailuresByFile( failures ).slice( -50 );
 		listEl.innerHTML = '';
-		toShow.forEach( function ( failure ) {
-			listEl.appendChild( buildFailureRow( failure ) );
+		groups.forEach( function ( group ) {
+			listEl.appendChild( buildFailureRow( group ) );
 		} );
 
 		// Rows start with no action buttons at all -- what's actually
@@ -214,7 +299,7 @@
 		// something to guess from the filename client-side, so it's
 		// always asked for fresh rather than cached from an earlier
 		// render (an attachment could have changed since).
-		requestClassifyFailures( toShow.map( function ( failure ) { return failure.file; } ) )
+		requestClassifyFailures( groups.map( function ( group ) { return group.file; } ) )
 			.then( function ( json ) {
 				if ( ! json.success ) {
 					return;
@@ -228,13 +313,27 @@
 			} );
 	}
 
-	function buildFailureRow( failure ) {
+	function buildFailureRow( group ) {
 		var li = document.createElement( 'li' );
-		li.dataset.file = failure.file;
+		li.dataset.file = group.file;
+
+		var fileLabel = document.createElement( 'span' );
+		fileLabel.className = 'wwg-failure-file';
+		fileLabel.textContent = group.file;
+		li.appendChild( fileLabel );
+
+		if ( shouldShowFormatBadges() ) {
+			var badges = document.createElement( 'div' );
+			badges.className = 'wwg-failure-badges';
+			group.entries.forEach( function ( entry ) {
+				badges.appendChild( buildFormatBadge( entry.format ) );
+			} );
+			li.appendChild( badges );
+		}
 
 		var text = document.createElement( 'span' );
 		text.className = 'wwg-failure-text';
-		text.textContent = failure.file + ': ' + failure.error;
+		text.textContent = summarizeFailureText( group );
 		li.appendChild( text );
 
 		var actions = document.createElement( 'div' );
@@ -395,43 +494,57 @@
 		} );
 	}
 
-	// Mirrors WWG_Admin::remove_failure_from_scan_state() exactly -- kept
-	// in sync client-side so both regions reflect a fix/delete right
-	// away, without waiting on a fresh Scan/Generate run to notice.
+	// Mirrors WWG_Admin::remove_failure_from_scan_state()'s $format=null
+	// case exactly -- every remaining failure entry for this file is
+	// cleared at once, matching Fix/Delete both resolving every
+	// currently-failing enabled format of a file together server-side,
+	// not just one. Kept in sync client-side so both regions reflect a
+	// fix/delete right away, without waiting on a fresh Scan/Generate run
+	// to notice.
 	function removeFailureFromScanState( fileRel, fixed ) {
 		if ( ! scanState || ! scanState.failures || ! scanState.failures.length ) {
 			return;
 		}
-		var before = scanState.failures.length;
+		var removedUnits = 0;
 		scanState.failures = scanState.failures.filter( function ( failure ) {
-			return failure.file !== fileRel;
+			if ( failure.file !== fileRel ) {
+				return true;
+			}
+			removedUnits += 1;
+			return false;
 		} );
-		if ( scanState.failures.length === before ) {
+		if ( ! removedUnits ) {
 			return; // Wasn't listed here -- nothing to adjust.
 		}
 		if ( ! fixed ) {
-			scanState.missing = Math.max( 0, scanState.missing - 1 );
+			scanState.missing = Math.max( 0, scanState.missing - removedUnits );
+			scanState.missing_files = Math.max( 0, scanState.missing_files - 1 );
 		}
 	}
 
-	// Mirrors WWG_Job::remove_failure_from_state() exactly.
+	// Mirrors WWG_Job::remove_failure_from_state()'s $format=null case the
+	// same way.
 	function removeFailureFromJobState( fileRel, fixed ) {
 		if ( ! jobState || ! jobState.stats || ! jobState.stats.failures || ! jobState.stats.failures.length ) {
 			return;
 		}
-		var before = jobState.stats.failures.length;
+		var removedUnits = 0;
 		jobState.stats.failures = jobState.stats.failures.filter( function ( failure ) {
-			return failure.file !== fileRel;
+			if ( failure.file !== fileRel ) {
+				return true;
+			}
+			removedUnits += 1;
+			return false;
 		} );
-		if ( jobState.stats.failures.length === before ) {
+		if ( ! removedUnits ) {
 			return; // Wasn't part of this run's own record -- nothing to adjust.
 		}
-		jobState.stats.failed = Math.max( 0, jobState.stats.failed - 1 );
+		jobState.stats.failed = Math.max( 0, jobState.stats.failed - removedUnits );
 		if ( fixed ) {
-			jobState.stats.converted += 1;
+			jobState.stats.converted += removedUnits;
 		} else {
-			jobState.stats.missing = Math.max( 0, jobState.stats.missing - 1 );
-			jobState.total_missing = Math.max( 0, jobState.total_missing - 1 );
+			jobState.stats.missing = Math.max( 0, jobState.stats.missing - removedUnits );
+			jobState.total_missing = Math.max( 0, jobState.total_missing - removedUnits );
 		}
 	}
 
@@ -462,20 +575,21 @@
 	function updateActionButtons() {
 		var jobRunning = 'running' === jobState.status;
 		var jobPaused = 'paused' === jobState.status;
-		var webpSupported = '1' === els.panel.getAttribute( 'data-webp-supported' );
+		var anyFormatEnabled = '1' === els.panel.getAttribute( 'data-any-format-enabled' );
 
 		// Neither button is ever usable at all on a server that can't
-		// produce .webp -- see the readme's own FAQ: "Scan/Generate are
-		// disabled until that's resolved, rather than letting you run a
-		// tool that can't do anything." Scan doesn't strictly need a
-		// working backend itself (it only checks file_exists()), but
-		// there'd be nothing useful to do with what it finds.
-		els.scanBtn.disabled = scanRunning || jobRunning || startingJob || ! webpSupported;
+		// produce WebP or AVIF -- see the readme's own FAQ: "Scan/
+		// Generate are disabled until that's resolved, rather than
+		// letting you run a tool that can't do anything." Scan doesn't
+		// strictly need a working backend itself (it only checks
+		// file_exists()), but there'd be nothing useful to do with what
+		// it finds.
+		els.scanBtn.disabled = scanRunning || jobRunning || startingJob || ! anyFormatEnabled;
 		els.cancelBtn.disabled = ! jobRunning;
 
 		if ( jobPaused ) {
 			els.generateBtn.textContent = wwgAdmin.strings.resumeGenerating;
-			els.generateBtn.disabled = scanRunning || startingJob || ! webpSupported;
+			els.generateBtn.disabled = scanRunning || startingJob || ! anyFormatEnabled;
 			return;
 		}
 
@@ -483,7 +597,7 @@
 		els.generateBtn.disabled = jobRunning
 			|| scanRunning
 			|| startingJob
-			|| ! webpSupported
+			|| ! anyFormatEnabled
 			|| ! scanState.finished_at // never scanned, or invalidated back to "not checked" -- see renderStatusIdle().
 			|| !! scanState.invalidated_at
 			|| 0 === scanState.missing;
@@ -530,23 +644,28 @@
 		els.statusProgress.hidden = true;
 		els.statusLog.hidden = true;
 
-		if ( 0 === scanState.missing ) {
+		if ( 0 === scanState.missing_files ) {
 			els.statusHeadline.textContent = wwgAdmin.strings.missingNone;
 		} else {
-			var template = 1 === scanState.missing ? wwgAdmin.strings.missingSingular : wwgAdmin.strings.missingPlural;
+			var template = 1 === scanState.missing_files ? wwgAdmin.strings.missingSingular : wwgAdmin.strings.missingPlural;
 			var headline = template
-				.replace( '%1$d', scanState.missing )
+				.replace( '%1$d', scanState.missing_files )
 				.replace( '%2$s', formatBytes( scanState.original_bytes ) );
 
 			// Some of the "missing" count above may be files already known
 			// to fail permanently -- called out as an explicit *subset* of
 			// that count ("Of these, N…"), not a second, seemingly separate
 			// number (see missingKnownFailures*'s own docblock in PHP).
+			// Counted by distinct FILE here too, matching missing_files
+			// above -- scanState.failures itself is a flat (file, format)
+			// list, so a file failing both formats must still only count
+			// once in this sentence.
 			if ( scanState.failures.length ) {
-				var knownTemplate = 1 === scanState.failures.length
+				var knownFileCount = countDistinctFiles( scanState.failures );
+				var knownTemplate = 1 === knownFileCount
 					? wwgAdmin.strings.missingKnownFailuresSingular
 					: wwgAdmin.strings.missingKnownFailuresPlural;
-				headline += ' ' + knownTemplate.replace( '%d', scanState.failures.length );
+				headline += ' ' + knownTemplate.replace( '%d', knownFileCount );
 			}
 			els.statusHeadline.textContent = headline;
 		}
@@ -570,7 +689,7 @@
 	}
 
 	function freshScanTotals() {
-		return { scanned: 0, missing: 0, originalBytes: 0, failures: [] };
+		return { scanned: 0, missing: 0, missingFiles: 0, originalBytes: 0, failures: [] };
 	}
 
 	function runScan() {
@@ -594,6 +713,7 @@
 			var data = json.data;
 			totals.scanned += data.stats.scanned;
 			totals.missing += data.stats.missing;
+			totals.missingFiles += data.stats.missing_files;
 			totals.originalBytes += data.stats.original_bytes;
 			if ( data.stats.failures && data.stats.failures.length ) {
 				// Known permanent failures Scan is just re-surfacing (it
@@ -629,6 +749,7 @@
 		// actually persisted (its clock is authoritative for "As of…").
 		var optimistic = {
 			missing: totals.missing,
+			missing_files: totals.missingFiles,
 			original_bytes: totals.originalBytes,
 			failures: totals.failures,
 			finished_at: Math.floor( Date.now() / 1000 ),
@@ -756,6 +877,41 @@
 		els.resultsBox.hidden = false;
 	}
 
+	// One "<format> vs. originals" tile per enabled format -- 1 tile on a
+	// server producing only one format (unlabelled, matching this page's
+	// original single-format wording exactly), one labelled tile per
+	// format side by side once more than one is active.
+	function renderBytesTiles() {
+		if ( ! els.cBytesTiles ) {
+			return;
+		}
+		els.cBytesTiles.innerHTML = '';
+		var formats = wwgAdmin.enabledFormats || [];
+		var labelled = formats.length > 1;
+
+		formats.forEach( function ( format ) {
+			var tile = document.createElement( 'div' );
+			tile.className = 'wwg-stat';
+
+			var value = document.createElement( 'span' );
+			value.className = 'wwg-stat-value';
+			value.textContent = formatBytes( jobState.stats[ format + '_bytes' ] ) + ' ' + wwgAdmin.strings.vsOriginal + ' ' + formatBytes( jobState.stats.original_bytes );
+			tile.appendChild( value );
+
+			var label = document.createElement( 'span' );
+			label.className = 'wwg-stat-label';
+			if ( labelled ) {
+				label.appendChild( buildFormatBadge( format ) );
+				label.appendChild( document.createTextNode( ' ' + wwgAdmin.strings.vsOriginals ) );
+			} else {
+				label.textContent = wwgAdmin.strings.newSizeVsOriginals;
+			}
+			tile.appendChild( label );
+
+			els.cBytesTiles.appendChild( tile );
+		} );
+	}
+
 	// Fills in everything renderResultsRunning()/Paused()/Done() share:
 	// the progress bar, the summary sentence, the stats grid, and the
 	// failures/recoveries lists. Each caller sets the dot/chip and log
@@ -771,8 +927,7 @@
 
 		els.convertResults.hidden = false;
 		document.getElementById( 'wwg-c-failed' ).textContent = jobState.stats.failed;
-		document.getElementById( 'wwg-c-bytes' ).textContent =
-			formatBytes( jobState.stats.webp_bytes ) + ' ' + wwgAdmin.strings.vsOriginal + ' ' + formatBytes( jobState.stats.original_bytes );
+		renderBytesTiles();
 
 		renderFailuresInto( els.failuresList, els.failuresCount, els.failures, jobState.stats.failures );
 
