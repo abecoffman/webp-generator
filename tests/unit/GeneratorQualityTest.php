@@ -13,7 +13,7 @@ use Brain\Monkey\Functions;
  */
 class GeneratorQualityTest extends TestCase {
 
-	public function test_default_is_75_when_option_not_set() {
+	public function test_default_is_75_when_webp_option_not_set() {
 		Functions\expect( 'get_option' )
 			->once()
 			->with( 'wwg_quality', 75 )
@@ -21,7 +21,26 @@ class GeneratorQualityTest extends TestCase {
 
 		$generator = new \WWG_Generator();
 
-		$this->assertSame( 75, $generator->get_quality() );
+		$this->assertSame( 75, $generator->get_quality( 'webp' ) );
+	}
+
+	public function test_default_is_75_when_avif_option_not_set() {
+		Functions\expect( 'get_option' )
+			->once()
+			->with( 'wwg_quality_avif', 75 )
+			->andReturn( 75 );
+
+		$generator = new \WWG_Generator();
+
+		$this->assertSame( 75, $generator->get_quality( 'avif' ) );
+	}
+
+	public function test_returns_the_default_for_an_unrecognized_format_without_reading_any_option() {
+		Functions\expect( 'get_option' )->never();
+
+		$generator = new \WWG_Generator();
+
+		$this->assertSame( 75, $generator->get_quality( 'heic' ) );
 	}
 
 	/**
@@ -32,7 +51,8 @@ class GeneratorQualityTest extends TestCase {
 
 		$generator = new \WWG_Generator();
 
-		$this->assertSame( $expected, $generator->get_quality() );
+		$this->assertSame( $expected, $generator->get_quality( 'webp' ) );
+		$this->assertSame( $expected, $generator->get_quality( 'avif' ) );
 	}
 
 	public static function provide_in_range_values() {
@@ -52,7 +72,8 @@ class GeneratorQualityTest extends TestCase {
 
 		$generator = new \WWG_Generator();
 
-		$this->assertSame( $expected, $generator->get_quality() );
+		$this->assertSame( $expected, $generator->get_quality( 'webp' ) );
+		$this->assertSame( $expected, $generator->get_quality( 'avif' ) );
 	}
 
 	public static function provide_out_of_range_values() {

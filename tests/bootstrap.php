@@ -32,8 +32,14 @@ if ( ! defined( 'HOUR_IN_SECONDS' ) ) {
 if ( ! defined( 'MINUTE_IN_SECONDS' ) ) {
 	define( 'MINUTE_IN_SECONDS', 60 );
 }
+if ( ! defined( 'WEEK_IN_SECONDS' ) ) {
+	define( 'WEEK_IN_SECONDS', 604800 );
+}
 
 require_once WWG_PATH . 'includes/class-wwg-cache.php';
+require_once WWG_PATH . 'includes/class-wwg-format.php';
 require_once WWG_PATH . 'includes/class-wwg-generator.php';
 require_once WWG_PATH . 'includes/class-wwg-htaccess.php';
+require_once WWG_PATH . 'includes/class-wwg-attachment-resolver.php';
 require_once WWG_PATH . 'includes/class-wwg-admin.php';
+require_once WWG_PATH . 'includes/class-wwg-job.php';

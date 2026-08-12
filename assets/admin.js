@@ -1,56 +1,108 @@
 /**
- * Drives the Tools > WebP Generator "Generate WebP Images" panel as an
- * explicit 3-button state machine (Scan / Generate / Cancel), each step
- * one bounded batch against WWG_Admin's AJAX endpoint:
+ * Drives the Tools > WebP Generator "Generate WebP Images" panel.
  *
- *  1. Only "Scan" starts enabled.
- *  2. Scan runs, live count climbing, until it's walked the whole
- *     uploads tree once.
- *  3. Scan finishes: shows how many images are missing a .webp, enables
- *     "Generate", disables "Scan" (one scan per page load).
- *  5. Generate runs, live count climbing; enables "Cancel", disables
- *     "Generate".
- *  6. Cancel stops the batch loop and *pauses* -- current progress and
- *     cursor position are kept, not discarded -- and re-enables
- *     "Generate" to resume from exactly where it left off.
- *  7. Generate finishing naturally (not cancelled) disables every
- *     button and shows the final summary.
+ * The panel is three regions, always in the same place:
+ *   1. Library Status  -- what's currently known about the media library
+ *      (a persisted server-side snapshot of Scan's last completed run --
+ *      see WWG_Admin::OPTION_SCAN_STATE -- so it survives a reload
+ *      instead of resetting to blank).
+ *   2. Actions -- the Scan/Generate/Cancel buttons.
+ *   3. Generate Results -- Generate's own live progress while running,
+ *      settling into a dated "last run" record once done (a persisted
+ *      WWG_Job state, same as before).
+ * Each region's *substate* changes in place (a small status dot + label)
+ * rather than jumping to a different part of the page, and each is
+ * rendered from server-authoritative state on every page load, not just
+ * live updates -- the same rule applies whether a state just became true
+ * a second ago or three weeks ago.
+ *
+ * Scan is a small, bounded client-driven loop: JS calls WWG_Admin's AJAX
+ * endpoint, gets a cursor back, calls again, until done, then saves the
+ * final tally server-side.
+ *
+ * Generate is different: it runs as a WP-Cron background job (see
+ * WWG_Job) so it keeps going even if this tab closes. While the tab
+ * *is* open, though, this script actively drives it at full speed --
+ * each batch's response immediately triggers the next request -- rather
+ * than passively waiting on WP-Cron's own ~60s self-throttle, which
+ * applies whether or not anyone's watching. WWG_Job::process_one_batch()
+ * shares one lock between this driving loop and the cron tick, so they
+ * can never double-process the same batch; whichever gets there first
+ * wins, the other backs off and retries shortly. That's also what makes
+ * page load able to resume mid-run at full speed: the state this boots
+ * from (`wwgAdmin.jobState`) is the server's, not something this script
+ * has to have built up itself in the current pageview.
  */
 ( function () {
 	'use strict';
 
 	var els = {};
-	var running = false;
-	var cancelRequested = false;
-	var webpSupported = true;
+	var scanRunning = false;
+	var startingJob = false; // true only for the brief round-trip starting/resuming a job -- prevents a rapid double-click firing wwg_start_job twice.
+	var jobState = null;
+	var scanState = null;
+	var generateDefaultLabel = '';
 
-	// Generate is resumable across Cancel/Generate cycles, so its totals
-	// and cursor live outside any single run and only get created once.
-	var generateTotals = null;
-	var generateCursor = { dirIndex: 0, fileOffset: 0 };
+	// The authoritative "should the drive loop keep going" flag -- not
+	// just a pending timeout handle, since during the normal fast-path
+	// case (server keeps returning 'advanced') there IS no pending
+	// timeout at all: each response triggers the next request directly
+	// from inside the previous one's .then(). A timeout-only guard
+	// (checking `if (driveTimeout)`) would fail to stop an in-flight
+	// request from recursing once more if stopDriving() is called while
+	// that request is still in the air (e.g. clicking Cancel mid-batch).
+	var driving = false;
+	var driveTimeout = null;
+	var driveRetryDelay = 400; // ms; doubles on 'locked', capped below.
+	var DRIVE_RETRY_MAX_MS = 5000;
 
 	document.addEventListener( 'DOMContentLoaded', function () {
 		els.panel = document.querySelector( '.wwg-panel' );
 		els.scanBtn = document.getElementById( 'wwg-scan' );
 		els.generateBtn = document.getElementById( 'wwg-generate' );
 		els.cancelBtn = document.getElementById( 'wwg-cancel' );
+
+		// Region 1: Library Status.
+		els.statusDot = document.getElementById( 'wwg-status-dot' );
+		els.statusChipLabel = document.getElementById( 'wwg-status-chip-label' );
+		els.statusIdle = document.getElementById( 'wwg-status-idle' );
+		els.statusHeadline = document.getElementById( 'wwg-status-headline' );
+		els.statusMeta = document.getElementById( 'wwg-status-meta' );
+		els.statusProgress = document.getElementById( 'wwg-status-progress' );
+		els.statusProgressFill = els.statusProgress.querySelector( '.wwg-progress-bar-fill' );
+		els.statusProgressLabel = els.statusProgress.querySelector( '.wwg-progress-label' );
+		els.statusLog = document.getElementById( 'wwg-status-log' );
+		els.statusFailures = document.getElementById( 'wwg-status-failures' );
+		els.statusFailuresCount = document.getElementById( 'wwg-status-failures-count' );
+		els.statusFailuresList = document.getElementById( 'wwg-status-failures-list' );
+
+		// Region 3: Generate Results.
+		els.resultsBox = document.getElementById( 'wwg-results-box' );
+		els.resultsDot = document.getElementById( 'wwg-results-dot' );
+		els.resultsChipLabel = document.getElementById( 'wwg-results-chip-label' );
 		els.progress = document.getElementById( 'wwg-progress' );
 		els.progressFill = els.progress.querySelector( '.wwg-progress-bar-fill' );
 		els.progressLabel = els.progress.querySelector( '.wwg-progress-label' );
 		els.summary = document.getElementById( 'wwg-summary' );
 		els.convertResults = document.getElementById( 'wwg-convert-results' );
+		els.cBytesTiles = document.getElementById( 'wwg-c-bytes-tiles' );
+		els.failures = document.getElementById( 'wwg-failures' );
+		els.failuresCount = document.getElementById( 'wwg-failures-count' );
+		els.failuresList = document.getElementById( 'wwg-failures-list' );
+		els.recoveries = document.getElementById( 'wwg-recoveries' );
+		els.recoveriesCount = document.getElementById( 'wwg-recoveries-count' );
+		els.recoveriesList = document.getElementById( 'wwg-recoveries-list' );
 		els.log = document.getElementById( 'wwg-log' );
 
-		webpSupported = els.panel.getAttribute( 'data-webp-supported' ) === '1';
+		jobState = wwgAdmin.jobState;
+		scanState = wwgAdmin.scanState;
+		generateDefaultLabel = els.generateBtn.textContent;
 
 		els.scanBtn.addEventListener( 'click', runScan );
-		els.generateBtn.addEventListener( 'click', function () {
-			var resuming = generateTotals !== null;
-			if ( resuming || window.confirm( wwgAdmin.strings.confirmGenerate ) ) {
-				runGenerate();
-			}
-		} );
+		els.generateBtn.addEventListener( 'click', onGenerateClick );
 		els.cancelBtn.addEventListener( 'click', requestCancel );
+
+		boot();
 	} );
 
 	function formatBytes( bytes ) {
@@ -62,25 +114,20 @@
 		return ( bytes / Math.pow( 1024, i ) ).toFixed( i === 0 ? 0 : 1 ) + ' ' + units[ i ];
 	}
 
-	function freshTotals() {
-		return {
-			dirsDone: 0,
-			totalDirs: 0,
-			scanned: 0,
-			missing: 0,
-			originalBytes: 0,
-			converted: 0,
-			failed: 0,
-			webpBytes: 0,
-			cacheCleared: false,
-		};
+	// An absolute date/time (not "3 days ago") -- deliberately: the whole
+	// point of using this is to make unambiguous whether a completed run
+	// being displayed happened moments ago or weeks ago, and an absolute
+	// timestamp answers that at a glance without needing a live-updating
+	// "N minutes ago" label or a pile of new relative-time translated
+	// strings just for this one spot.
+	function formatDateTime( unixSeconds ) {
+		return new Date( unixSeconds * 1000 ).toLocaleString( undefined, { dateStyle: 'medium', timeStyle: 'short' } );
 	}
 
-	function requestBatch( mode, dirIndex, fileOffset ) {
+	function requestBatch( dirIndex, fileOffset ) {
 		var body = new FormData();
 		body.append( 'action', wwgAdmin.action );
 		body.append( 'nonce', wwgAdmin.nonce );
-		body.append( 'mode', mode );
 		body.append( 'dir_index', dirIndex );
 		body.append( 'file_offset', fileOffset );
 
@@ -90,212 +137,954 @@
 			} );
 	}
 
-	function applyStats( totals, data ) {
-		totals.dirsDone = data.dir_index;
-		totals.totalDirs = data.total_dirs;
-		if ( data.stats ) {
-			totals.scanned += data.stats.scanned;
-			totals.missing += data.stats.missing;
-			totals.originalBytes += data.stats.original_bytes;
-			totals.converted += data.stats.converted;
-			totals.failed += data.stats.failed;
-			totals.webpBytes += data.stats.webp_bytes;
+	function requestJobAction( action, extraFields ) {
+		var body = new FormData();
+		body.append( 'action', action );
+		body.append( 'nonce', wwgAdmin.nonce );
+		if ( extraFields ) {
+			Object.keys( extraFields ).forEach( function ( key ) {
+				body.append( key, extraFields[ key ] );
+			} );
 		}
-		if ( data.cache_cleared ) {
-			totals.cacheCleared = true;
-		}
+
+		return fetch( wwgAdmin.ajaxUrl, { method: 'POST', credentials: 'same-origin', body: body } )
+			.then( function ( response ) {
+				return response.json();
+			} );
 	}
 
-	function updateProgressBar( data ) {
-		var pct = data.total_dirs ? Math.min( 100, Math.round( ( data.dir_index / data.total_dirs ) * 100 ) ) : 100;
-		els.progressFill.style.width = pct + '%';
-		els.progressLabel.textContent = pct + '% (' + data.dir_index + ' / ' + data.total_dirs + ' ' + wwgAdmin.strings.folders + ')';
+	function requestSaveScanResult( totals ) {
+		return requestJobAction( wwgAdmin.scanSaveAction, {
+			missing: totals.missing,
+			missing_files: totals.missingFiles,
+			original_bytes: totals.originalBytes,
+			// A JSON string, not repeated form fields -- each entry is a
+			// {file, format, error} triple, and PHP decodes this the same
+			// way it already treats the rest of this endpoint's input:
+			// capped, sanitized, never trusted length-wise.
+			failures: JSON.stringify( totals.failures.slice( -500 ) ),
+		} );
 	}
 
-	function updateLog( mode, data ) {
-		if ( data.done ) {
-			els.log.textContent = '';
+	function requestClassifyFailures( files ) {
+		return requestJobAction( wwgAdmin.classifyAction, { files: JSON.stringify( files ) } );
+	}
+
+	function requestFixFailure( fileRel ) {
+		return requestJobAction( wwgAdmin.fixAction, { file: fileRel } );
+	}
+
+	function requestDeleteFailure( fileRel ) {
+		return requestJobAction( wwgAdmin.deleteAction, { file: fileRel } );
+	}
+
+	// ---- Shared rendering helpers (both Region 1 and Region 3 use these) ----
+
+	function setStatusDot( el, state ) {
+		el.className = 'wwg-status-dot wwg-status-dot--' + state;
+	}
+
+	function setChipLabel( el, state, text ) {
+		el.textContent = text;
+		el.className = 'wwg-status-chip-label' + ( state && 'idle' !== state ? ' wwg-status-chip-label--' + state : '' );
+	}
+
+	// Groups a flat {file, format, error} list into one entry per file --
+	// Fix/Delete both act on every currently-failing enabled format of a
+	// file together (see WWG_Admin::classify_failure()'s own docblock),
+	// so the UI shows one row per file (with a format badge per entry),
+	// not one row per (file, format) pair, which would show duplicate
+	// buttons that do the exact same thing. Preserves the input's
+	// original first-seen order.
+	function groupFailuresByFile( failures ) {
+		var order = [];
+		var byFile = {};
+		failures.forEach( function ( failure ) {
+			if ( ! byFile[ failure.file ] ) {
+				byFile[ failure.file ] = { file: failure.file, entries: [] };
+				order.push( failure.file );
+			}
+			// A failure entry persisted before AVIF existed has no
+			// `format` field at all -- only WebP could have been meant
+			// then (mirrors WWG_Admin's own formats_of()/
+			// remove_failure_from_scan_state() back-compat reasoning).
+			byFile[ failure.file ].entries.push(
+				failure.format ? failure : Object.assign( {}, failure, { format: 'webp' } )
+			);
+		} );
+		return order.map( function ( file ) {
+			return byFile[ file ];
+		} );
+	}
+
+	function countDistinctFiles( failures ) {
+		var seen = {};
+		var count = 0;
+		failures.forEach( function ( failure ) {
+			if ( ! seen[ failure.file ] ) {
+				seen[ failure.file ] = true;
+				count += 1;
+			}
+		} );
+		return count;
+	}
+
+	function formatLabel( format ) {
+		return ( wwgAdmin.formatLabels && wwgAdmin.formatLabels[ format ] ) || format;
+	}
+
+	function buildFormatBadge( format ) {
+		var span = document.createElement( 'span' );
+		span.className = 'wwg-chip wwg-chip--' + format;
+		span.textContent = formatLabel( format );
+		return span;
+	}
+
+	// Badges only earn their keep once there's more than one format this
+	// site actually produces -- on a single-format server every row would
+	// show the same one badge, uninformative clutter rather than a signal.
+	function shouldShowFormatBadges() {
+		return !! ( wwgAdmin.enabledFormats && wwgAdmin.enabledFormats.length > 1 );
+	}
+
+	// One combined line if every entry in the group shares the same
+	// underlying error (the common case -- one broken source derivative
+	// breaks every format converted from it identically); one line per
+	// distinct error, labelled by format, otherwise -- so a genuine
+	// per-format divergence isn't silently hidden behind whichever entry
+	// happened to render.
+	function summarizeFailureText( group ) {
+		var uniqueErrors = [];
+		group.entries.forEach( function ( entry ) {
+			if ( -1 === uniqueErrors.indexOf( entry.error ) ) {
+				uniqueErrors.push( entry.error );
+			}
+		} );
+		if ( 1 === uniqueErrors.length ) {
+			return uniqueErrors[ 0 ];
+		}
+		return group.entries.map( function ( entry ) {
+			return formatLabel( entry.format ) + ': ' + entry.error;
+		} ).join( ' — ' );
+	}
+
+	// Shared by Region 1's own "Failed conversions" (known failures Scan
+	// re-surfaced) and Region 3's (this Generate run's failures) -- a
+	// failure reads the same regardless of which box is reporting it,
+	// right down to the next-best-action offered on it. $failures is a
+	// flat {file, format, error} list -- grouped by file for display, see
+	// groupFailuresByFile().
+	function renderFailuresInto( listEl, countEl, detailsEl, failures ) {
+		if ( ! failures || ! failures.length ) {
+			detailsEl.hidden = true;
 			return;
 		}
-		var template = mode === 'convert' ? wwgAdmin.strings.converting : wwgAdmin.strings.checking;
-		var label = data.dir ? data.dir : wwgAdmin.strings.uploadsRoot;
-		els.log.textContent = template.replace( '%s', label );
+		detailsEl.hidden = false;
+		// The raw (file, format) unit count -- matches the "%d failed"
+		// summary line elsewhere on the page, which counts the same way.
+		countEl.textContent = failures.length;
+
+		// Keep the DOM light on a run with hundreds of failures -- the
+		// count above already reflects the true total, this list is for
+		// spot-checking specific files, not an exhaustive report.
+		var groups = groupFailuresByFile( failures ).slice( -50 );
+		listEl.innerHTML = '';
+		groups.forEach( function ( group ) {
+			listEl.appendChild( buildFailureRow( group ) );
+		} );
+
+		// Rows start with no action buttons at all -- what's actually
+		// possible for a given file (fix, delete, or delete-the-whole-
+		// attachment) is a fact about WordPress's current state, not
+		// something to guess from the filename client-side, so it's
+		// always asked for fresh rather than cached from an earlier
+		// render (an attachment could have changed since).
+		requestClassifyFailures( groups.map( function ( group ) { return group.file; } ) )
+			.then( function ( json ) {
+				if ( ! json.success ) {
+					return;
+				}
+				Array.prototype.forEach.call( listEl.children, function ( li ) {
+					var info = json.data[ li.dataset.file ];
+					if ( info ) {
+						renderRowActions( li, li.dataset.file, info );
+					}
+				} );
+			} );
 	}
 
-	function renderGenerateResults( totals ) {
-		els.convertResults.hidden = false;
-		document.getElementById( 'wwg-c-failed' ).textContent = totals.failed;
-		document.getElementById( 'wwg-c-bytes' ).textContent =
-			formatBytes( totals.webpBytes ) + ' ' + wwgAdmin.strings.vsOriginal + ' ' + formatBytes( totals.originalBytes );
+	function buildFailureRow( group ) {
+		var li = document.createElement( 'li' );
+		li.dataset.file = group.file;
+
+		var fileLabel = document.createElement( 'span' );
+		fileLabel.className = 'wwg-failure-file';
+		fileLabel.textContent = group.file;
+		li.appendChild( fileLabel );
+
+		if ( shouldShowFormatBadges() ) {
+			var badges = document.createElement( 'div' );
+			badges.className = 'wwg-failure-badges';
+			group.entries.forEach( function ( entry ) {
+				badges.appendChild( buildFormatBadge( entry.format ) );
+			} );
+			li.appendChild( badges );
+		}
+
+		var text = document.createElement( 'span' );
+		text.className = 'wwg-failure-text';
+		text.textContent = summarizeFailureText( group );
+		li.appendChild( text );
+
+		var actions = document.createElement( 'div' );
+		actions.className = 'wwg-failure-actions';
+		li.appendChild( actions );
+
+		var status = document.createElement( 'span' );
+		status.className = 'wwg-failure-status';
+		status.hidden = true;
+		li.appendChild( status );
+
+		return li;
 	}
 
-	// ---- Step 1-3: Scan ----
+	function buildRowButton( label, extraClass ) {
+		var btn = document.createElement( 'button' );
+		btn.type = 'button';
+		btn.className = 'button button-small wwg-row-btn' + ( extraClass ? ' ' + extraClass : '' );
+		btn.textContent = label;
+		return btn;
+	}
+
+	function buildViewInMediaLibraryLink( url ) {
+		var a = document.createElement( 'a' );
+		a.className = 'wwg-row-link';
+		a.href = url;
+		a.target = '_blank';
+		a.rel = 'noopener noreferrer';
+		a.textContent = wwgAdmin.strings.viewInMediaLibrary;
+		return a;
+	}
+
+	function insertReason( li, text ) {
+		var reason = document.createElement( 'span' );
+		reason.className = 'wwg-failure-reason';
+		reason.textContent = text;
+		li.insertBefore( reason, li.querySelector( '.wwg-failure-actions' ) );
+	}
+
+	// Builds the actual next-best-action for one row, based on what
+	// classify_failure() determined server-side -- see its docblock in
+	// class-wwg-admin.php for the three possible outcomes this switches on.
+	function renderRowActions( li, fileRel, info ) {
+		var actions = li.querySelector( '.wwg-failure-actions' );
+		actions.innerHTML = '';
+		var existingReason = li.querySelector( '.wwg-failure-reason' );
+		if ( existingReason ) {
+			existingReason.remove();
+		}
+
+		if ( 'fix_or_delete' === info.action ) {
+			var fixBtn = buildRowButton( wwgAdmin.strings.fixThisFile, 'button-primary' );
+			fixBtn.addEventListener( 'click', function () {
+				runRowAction( li, fileRel, requestFixFailure, wwgAdmin.strings.fixing );
+			} );
+			actions.appendChild( fixBtn );
+
+			var deleteLink = document.createElement( 'button' );
+			deleteLink.type = 'button';
+			deleteLink.className = 'wwg-row-link';
+			deleteLink.textContent = wwgAdmin.strings.deleteInstead;
+			deleteLink.addEventListener( 'click', function () {
+				if ( window.confirm( wwgAdmin.strings.confirmDeleteDerivative ) ) {
+					runRowAction( li, fileRel, requestDeleteFailure, wwgAdmin.strings.deleting );
+				}
+			} );
+			actions.appendChild( deleteLink );
+		} else if ( 'delete_only' === info.action ) {
+			if ( info.reason ) {
+				insertReason( li, info.reason );
+			}
+
+			var deleteBtn = buildRowButton( wwgAdmin.strings.deleteThisFile );
+			deleteBtn.addEventListener( 'click', function () {
+				if ( window.confirm( wwgAdmin.strings.confirmDeleteOnly ) ) {
+					runRowAction( li, fileRel, requestDeleteFailure, wwgAdmin.strings.deleting );
+				}
+			} );
+			actions.appendChild( deleteBtn );
+
+			if ( info.edit_url ) {
+				actions.appendChild( buildViewInMediaLibraryLink( info.edit_url ) );
+			}
+		} else if ( 'delete_original' === info.action ) {
+			insertReason( li, wwgAdmin.strings.originalNote );
+
+			var deleteOriginalBtn = buildRowButton( wwgAdmin.strings.deleteThisFile, 'wwg-row-btn--danger' );
+			deleteOriginalBtn.addEventListener( 'click', function () {
+				if ( window.confirm( wwgAdmin.strings.confirmDeleteOriginal ) ) {
+					runRowAction( li, fileRel, requestDeleteFailure, wwgAdmin.strings.deleting );
+				}
+			} );
+			actions.appendChild( deleteOriginalBtn );
+
+			if ( info.edit_url ) {
+				actions.appendChild( buildViewInMediaLibraryLink( info.edit_url ) );
+			}
+		}
+	}
+
+	function setRowBusy( li, label ) {
+		var actions = li.querySelector( '.wwg-failure-actions' );
+		Array.prototype.forEach.call( actions.querySelectorAll( 'button' ), function ( btn ) {
+			btn.disabled = true;
+		} );
+		var statusEl = li.querySelector( '.wwg-failure-status' );
+		statusEl.hidden = false;
+		statusEl.className = 'wwg-failure-status';
+		statusEl.textContent = label;
+	}
+
+	function setRowMessage( li, message, isError ) {
+		var actions = li.querySelector( '.wwg-failure-actions' );
+		Array.prototype.forEach.call( actions.querySelectorAll( 'button' ), function ( btn ) {
+			btn.disabled = false;
+		} );
+		var statusEl = li.querySelector( '.wwg-failure-status' );
+		statusEl.hidden = false;
+		statusEl.className = 'wwg-failure-status' + ( isError ? ' wwg-failure-status--error' : '' );
+		statusEl.textContent = message;
+	}
+
+	// Shared by both the "Fix this file" and every "Delete..." button --
+	// only what request function to call and which in-flight label to
+	// show actually differs between them; which of fixed/deleted actually
+	// happened is read back from the response itself, not assumed from
+	// which button was clicked.
+	function runRowAction( li, fileRel, requestFn, inFlightLabel ) {
+		setRowBusy( li, inFlightLabel );
+
+		requestFn( fileRel ).then( function ( json ) {
+			if ( ! json.success ) {
+				setRowMessage( li, wwgAdmin.strings.actionFailedMessage, true );
+				return;
+			}
+
+			var result = json.data;
+			if ( 'fixed' === result.outcome || 'deleted' === result.outcome ) {
+				var fixed = 'fixed' === result.outcome;
+				removeFailureFromScanState( fileRel, fixed );
+				removeFailureFromJobState( fileRel, fixed );
+				refreshAfterFailureResolved();
+				return;
+			}
+
+			// 'not_regenerable' / 'stale' / 'failed' -- surface why, and
+			// re-classify this one row so its buttons reflect reality
+			// (e.g. a since-broken original now offers delete instead of
+			// fix) without needing a full page reload.
+			setRowMessage( li, result.message || wwgAdmin.strings.actionFailedMessage, true );
+			requestClassifyFailures( [ fileRel ] ).then( function ( classifyJson ) {
+				if ( classifyJson.success && classifyJson.data[ fileRel ] ) {
+					renderRowActions( li, fileRel, classifyJson.data[ fileRel ] );
+				}
+			} );
+		} ).catch( function () {
+			setRowMessage( li, wwgAdmin.strings.actionFailedMessage, true );
+		} );
+	}
+
+	// Mirrors WWG_Admin::remove_failure_from_scan_state()'s $format=null
+	// case exactly -- every remaining failure entry for this file is
+	// cleared at once, matching Fix/Delete both resolving every
+	// currently-failing enabled format of a file together server-side,
+	// not just one. Kept in sync client-side so both regions reflect a
+	// fix/delete right away, without waiting on a fresh Scan/Generate run
+	// to notice.
+	function removeFailureFromScanState( fileRel, fixed ) {
+		if ( ! scanState || ! scanState.failures || ! scanState.failures.length ) {
+			return;
+		}
+		var removedUnits = 0;
+		scanState.failures = scanState.failures.filter( function ( failure ) {
+			if ( failure.file !== fileRel ) {
+				return true;
+			}
+			removedUnits += 1;
+			return false;
+		} );
+		if ( ! removedUnits ) {
+			return; // Wasn't listed here -- nothing to adjust.
+		}
+		if ( ! fixed ) {
+			scanState.missing = Math.max( 0, scanState.missing - removedUnits );
+			scanState.missing_files = Math.max( 0, scanState.missing_files - 1 );
+		}
+	}
+
+	// Mirrors WWG_Job::remove_failure_from_state()'s $format=null case the
+	// same way.
+	function removeFailureFromJobState( fileRel, fixed ) {
+		if ( ! jobState || ! jobState.stats || ! jobState.stats.failures || ! jobState.stats.failures.length ) {
+			return;
+		}
+		var removedUnits = 0;
+		jobState.stats.failures = jobState.stats.failures.filter( function ( failure ) {
+			if ( failure.file !== fileRel ) {
+				return true;
+			}
+			removedUnits += 1;
+			return false;
+		} );
+		if ( ! removedUnits ) {
+			return; // Wasn't part of this run's own record -- nothing to adjust.
+		}
+		jobState.stats.failed = Math.max( 0, jobState.stats.failed - removedUnits );
+		if ( fixed ) {
+			jobState.stats.converted += removedUnits;
+		} else {
+			jobState.stats.missing = Math.max( 0, jobState.stats.missing - removedUnits );
+			jobState.total_missing = Math.max( 0, jobState.total_missing - removedUnits );
+		}
+	}
+
+	// Re-renders whichever regions actually have something to show,
+	// after a fix/delete has already patched scanState/jobState in
+	// place -- reuses the existing render functions rather than
+	// hand-patching the DOM further, so headline sentences, counts, and
+	// the failures list itself all stay correct in one pass.
+	function refreshAfterFailureResolved() {
+		if ( scanState.finished_at && ! scanState.invalidated_at ) {
+			renderStatusDone();
+		}
+		if ( 'running' === jobState.status ) {
+			renderResultsRunning();
+		} else if ( 'paused' === jobState.status ) {
+			renderResultsPaused();
+		} else if ( 'done' === jobState.status ) {
+			renderResultsDone();
+		}
+	}
+
+	// The one place Scan/Generate/Cancel's enabled/disabled state and
+	// Generate's label are decided -- called at the end of every render
+	// function in both regions so the buttons can never drift out of
+	// sync with what's actually on screen (past bugs in this file were
+	// exactly that: button state set ad hoc in several different places
+	// that could disagree with each other).
+	function updateActionButtons() {
+		var jobRunning = 'running' === jobState.status;
+		var jobPaused = 'paused' === jobState.status;
+		var anyFormatEnabled = '1' === els.panel.getAttribute( 'data-any-format-enabled' );
+
+		// Neither button is ever usable at all on a server that can't
+		// produce WebP or AVIF -- see the readme's own FAQ: "Scan/
+		// Generate are disabled until that's resolved, rather than
+		// letting you run a tool that can't do anything." Scan doesn't
+		// strictly need a working backend itself (it only checks
+		// file_exists()), but there'd be nothing useful to do with what
+		// it finds.
+		els.scanBtn.disabled = scanRunning || jobRunning || startingJob || ! anyFormatEnabled;
+		els.cancelBtn.disabled = ! jobRunning;
+
+		if ( jobPaused ) {
+			els.generateBtn.textContent = wwgAdmin.strings.resumeGenerating;
+			els.generateBtn.disabled = scanRunning || startingJob || ! anyFormatEnabled;
+			return;
+		}
+
+		els.generateBtn.textContent = generateDefaultLabel;
+		els.generateBtn.disabled = jobRunning
+			|| scanRunning
+			|| startingJob
+			|| ! anyFormatEnabled
+			|| ! scanState.finished_at // never scanned, or invalidated back to "not checked" -- see renderStatusIdle().
+			|| !! scanState.invalidated_at
+			|| 0 === scanState.missing;
+	}
+
+	// ---- Region 1: Library Status ----
+
+	function renderStatusIdle() {
+		setStatusDot( els.statusDot, 'idle' );
+		setChipLabel( els.statusChipLabel, 'idle', wwgAdmin.strings.libraryStatusLabel );
+		els.statusIdle.hidden = false;
+		els.statusProgress.hidden = true;
+		els.statusLog.hidden = true;
+		els.statusFailures.hidden = true;
+
+		els.statusHeadline.textContent = wwgAdmin.strings.notCheckedYet;
+		els.statusMeta.textContent = scanState.invalidated_at
+			? wwgAdmin.strings.notCheckedYetInvalidated
+			: wwgAdmin.strings.notCheckedYetFirstTime;
+
+		updateActionButtons();
+	}
+
+	function renderStatusScanning( pct, label, currentDirLog ) {
+		setStatusDot( els.statusDot, 'live' );
+		setChipLabel( els.statusChipLabel, 'live', wwgAdmin.strings.scanningLabel );
+		els.statusIdle.hidden = true;
+		els.statusFailures.hidden = true; // a prior scan's list shouldn't linger while a fresh one runs.
+
+		els.statusProgress.hidden = false;
+		els.statusProgressFill.style.width = pct + '%';
+		els.statusProgressLabel.textContent = label;
+
+		els.statusLog.hidden = ! currentDirLog;
+		els.statusLog.textContent = currentDirLog || '';
+
+		updateActionButtons();
+	}
+
+	function renderStatusDone() {
+		setStatusDot( els.statusDot, 'done' );
+		setChipLabel( els.statusChipLabel, 'done', wwgAdmin.strings.libraryStatusLabel );
+		els.statusIdle.hidden = false;
+		els.statusProgress.hidden = true;
+		els.statusLog.hidden = true;
+
+		if ( 0 === scanState.missing_files ) {
+			els.statusHeadline.textContent = wwgAdmin.strings.missingNone;
+		} else {
+			var template = 1 === scanState.missing_files ? wwgAdmin.strings.missingSingular : wwgAdmin.strings.missingPlural;
+			var headline = template
+				.replace( '%1$d', scanState.missing_files )
+				.replace( '%2$s', formatBytes( scanState.original_bytes ) );
+
+			// Some of the "missing" count above may be files already known
+			// to fail permanently -- called out as an explicit *subset* of
+			// that count ("Of these, N…"), not a second, seemingly separate
+			// number (see missingKnownFailures*'s own docblock in PHP).
+			// Counted by distinct FILE here too, matching missing_files
+			// above -- scanState.failures itself is a flat (file, format)
+			// list, so a file failing both formats must still only count
+			// once in this sentence.
+			if ( scanState.failures.length ) {
+				var knownFileCount = countDistinctFiles( scanState.failures );
+				var knownTemplate = 1 === knownFileCount
+					? wwgAdmin.strings.missingKnownFailuresSingular
+					: wwgAdmin.strings.missingKnownFailuresPlural;
+				headline += ' ' + knownTemplate.replace( '%d', knownFileCount );
+			}
+			els.statusHeadline.textContent = headline;
+		}
+
+		els.statusMeta.textContent = wwgAdmin.strings.asOf.replace( '%s', formatDateTime( scanState.finished_at ) );
+		renderFailuresInto( els.statusFailuresList, els.statusFailuresCount, els.statusFailures, scanState.failures );
+
+		updateActionButtons();
+	}
+
+	// Renders whatever scanState currently says -- used both right after
+	// a scan finishes and to hydrate the box on a plain page load, since
+	// (per the whole point of persisting this) those must render
+	// identically.
+	function renderStatusFromState() {
+		if ( ! scanState.finished_at || scanState.invalidated_at ) {
+			renderStatusIdle();
+		} else {
+			renderStatusDone();
+		}
+	}
+
+	function freshScanTotals() {
+		return { scanned: 0, missing: 0, missingFiles: 0, originalBytes: 0, failures: [] };
+	}
 
 	function runScan() {
-		if ( running ) {
+		if ( scanRunning ) {
 			return;
 		}
-		running = true;
-
-		els.scanBtn.disabled = true;
-		els.generateBtn.disabled = true;
-		els.cancelBtn.disabled = true;
-
-		els.progress.hidden = false;
-		els.progressFill.style.width = '0%';
-		els.progressLabel.textContent = '';
-		els.log.textContent = '';
-		els.summary.textContent = wwgAdmin.strings.scannedSoFar.replace( '%d', 0 );
-
-		scanStep( freshTotals(), 0, 0 );
+		scanRunning = true;
+		renderStatusScanning( 0, '', '' );
+		scanStep( freshScanTotals(), 0, 0 );
 	}
 
 	function scanStep( totals, dirIndex, fileOffset ) {
-		requestBatch( 'scan', dirIndex, fileOffset ).then( function ( json ) {
+		requestBatch( dirIndex, fileOffset ).then( function ( json ) {
 			if ( ! json.success ) {
-				handleRequestFailure( json );
-				els.scanBtn.disabled = false; // let them retry a failed scan.
+				handleRequestFailure( els.statusLog, json );
+				scanRunning = false;
+				updateActionButtons(); // let them retry a failed scan.
 				return;
 			}
 
 			var data = json.data;
-			applyStats( totals, data );
-			updateProgressBar( data );
-			updateLog( 'scan', data );
-			els.summary.textContent = wwgAdmin.strings.scannedSoFar.replace( '%d', totals.scanned );
+			totals.scanned += data.stats.scanned;
+			totals.missing += data.stats.missing;
+			totals.missingFiles += data.stats.missing_files;
+			totals.originalBytes += data.stats.original_bytes;
+			if ( data.stats.failures && data.stats.failures.length ) {
+				// Known permanent failures Scan is just re-surfacing (it
+				// never attempts a real decode itself) -- capped the same
+				// way the Generate job's own accumulated stats are, purely
+				// defensive since this is expected to stay tiny in practice.
+				totals.failures = totals.failures.concat( data.stats.failures ).slice( -500 );
+			}
+
+			var pct = data.total_dirs ? Math.min( 100, Math.round( ( data.dir_index / data.total_dirs ) * 100 ) ) : 100;
+			var label = pct + '% (' + data.dir_index + ' / ' + data.total_dirs + ' ' + wwgAdmin.strings.folders + ')';
+			var currentDirLog = data.done ? '' : wwgAdmin.strings.checking.replace( '%s', data.dir ? data.dir : wwgAdmin.strings.uploadsRoot );
+			renderStatusScanning( pct, label, currentDirLog );
 
 			if ( data.done ) {
-				running = false;
+				scanRunning = false;
 				finishScan( totals );
 				return;
 			}
 
 			scanStep( totals, data.dir_index, data.file_offset );
 		} ).catch( function ( err ) {
-			handleNetworkFailure( err );
-			els.scanBtn.disabled = false;
+			handleNetworkFailure( els.statusLog, err );
+			scanRunning = false;
+			updateActionButtons();
 		} );
 	}
 
 	function finishScan( totals ) {
-		if ( totals.missing === 0 ) {
-			els.summary.textContent = wwgAdmin.strings.missingNone;
-			els.generateBtn.disabled = true;
-		} else {
-			var template = totals.missing === 1 ? wwgAdmin.strings.missingSingular : wwgAdmin.strings.missingPlural;
-			els.summary.textContent = template
-				.replace( '%1$d', totals.missing )
-				.replace( '%2$s', formatBytes( totals.originalBytes ) );
-			els.generateBtn.disabled = ! webpSupported;
-		}
-		// "Scan" stays disabled -- one scan per page load, by design;
-		// reload the page for a fresh count.
-	}
+		// Render immediately from the totals this run just measured --
+		// no need to wait on the save round-trip to show the admin their
+		// answer -- then reconcile scanState with whatever the server
+		// actually persisted (its clock is authoritative for "As of…").
+		var optimistic = {
+			missing: totals.missing,
+			missing_files: totals.missingFiles,
+			original_bytes: totals.originalBytes,
+			failures: totals.failures,
+			finished_at: Math.floor( Date.now() / 1000 ),
+			invalidated_at: null,
+		};
+		scanState = optimistic;
+		renderStatusDone();
 
-	// ---- Steps 5-7: Generate / Cancel ----
-
-	function runGenerate() {
-		if ( running ) {
-			return;
-		}
-		running = true;
-		cancelRequested = false;
-
-		els.generateBtn.disabled = true;
-		els.cancelBtn.disabled = false;
-		els.log.textContent = '';
-
-		if ( ! generateTotals ) {
-			generateTotals = freshTotals();
-			els.progress.hidden = false;
-			els.progressFill.style.width = '0%';
-			els.progressLabel.textContent = '';
-		}
-		// Resuming after a pause: progress bar/label are left exactly as
-		// they were, not reset.
-
-		generateStep( generateCursor.dirIndex, generateCursor.fileOffset );
-	}
-
-	function generateStep( dirIndex, fileOffset ) {
-		if ( cancelRequested ) {
-			pauseGenerate( dirIndex, fileOffset );
-			return;
-		}
-
-		requestBatch( 'convert', dirIndex, fileOffset ).then( function ( json ) {
-			if ( ! json.success ) {
-				handleRequestFailure( json );
-				els.generateBtn.disabled = false;
-				els.cancelBtn.disabled = true;
-				return;
+		requestSaveScanResult( totals ).then( function ( json ) {
+			if ( json.success ) {
+				scanState = json.data;
+				renderStatusDone();
 			}
-
-			var data = json.data;
-			applyStats( generateTotals, data );
-			updateProgressBar( data );
-			updateLog( 'convert', data );
-			renderGenerateResults( generateTotals );
-			els.summary.textContent = wwgAdmin.strings.generatedSoFar.replace( '%d', generateTotals.converted );
-
-			generateCursor = { dirIndex: data.dir_index, fileOffset: data.file_offset };
-
-			if ( data.done ) {
-				running = false;
-				finishGenerate();
-				return;
-			}
-
-			if ( cancelRequested ) {
-				pauseGenerate( data.dir_index, data.file_offset );
-				return;
-			}
-
-			generateStep( data.dir_index, data.file_offset );
-		} ).catch( function ( err ) {
-			handleNetworkFailure( err );
-			els.generateBtn.disabled = false;
-			els.cancelBtn.disabled = true;
+			// A failed save just means this exact result won't survive a
+			// reload -- Scan itself still did its job, and the optimistic
+			// render above already reflects the accurate answer for this
+			// pageview, so there's nothing more to recover from here.
 		} );
 	}
 
-	function requestCancel() {
-		if ( ! running ) {
+	// ---- Region 3: Generate Results ----
+
+	function onGenerateClick() {
+		if ( 'running' === jobState.status ) {
 			return;
 		}
-		cancelRequested = true;
-		// Prevent repeat clicks while the in-flight request finishes --
-		// the pause itself happens as soon as that response lands.
-		els.cancelBtn.disabled = true;
+		var resuming = 'paused' === jobState.status;
+		if ( resuming || window.confirm( wwgAdmin.strings.confirmGenerate ) ) {
+			startGenerateJob();
+		}
 	}
 
-	function pauseGenerate( dirIndex, fileOffset ) {
-		running = false;
-		generateCursor = { dirIndex: dirIndex, fileOffset: fileOffset };
-		els.generateBtn.disabled = false;
-		els.cancelBtn.disabled = true;
+	function startGenerateJob() {
+		startingJob = true;
+		updateActionButtons(); // disables Generate immediately -- before the round-trip, not after.
+
+		requestJobAction( wwgAdmin.jobActions.start, { total_missing: scanState.missing } ).then( function ( json ) {
+			startingJob = false;
+			if ( ! json.success ) {
+				handleRequestFailure( els.log, json );
+				updateActionButtons();
+				return;
+			}
+
+			jobState = json.data;
+			showResultsBox();
+			renderResultsRunning();
+			startDriving();
+		} ).catch( function ( err ) {
+			startingJob = false;
+			handleNetworkFailure( els.log, err );
+			updateActionButtons();
+		} );
+	}
+
+	function startDriving() {
+		if ( driving ) {
+			return;
+		}
+		driving = true;
+		driveRetryDelay = 400;
+		driveOnce();
+	}
+
+	function stopDriving() {
+		driving = false;
+		if ( driveTimeout ) {
+			clearTimeout( driveTimeout );
+			driveTimeout = null;
+		}
+	}
+
+	function driveOnce() {
+		requestJobAction( wwgAdmin.jobActions.drive ).then( function ( json ) {
+			if ( ! driving ) {
+				return; // stopDriving() ran while this request was in flight.
+			}
+			if ( ! json.success ) {
+				handleRequestFailure( els.log, json );
+				driving = false;
+				return;
+			}
+
+			var outcome = json.data.outcome;
+			jobState = json.data.state;
+
+			if ( 'locked' === outcome ) {
+				// A cron tick (or another tab) is mid-batch -- back off
+				// instead of hammering the server in a tight loop, and
+				// grow the wait each consecutive time this happens.
+				driveTimeout = setTimeout( driveOnce, driveRetryDelay );
+				driveRetryDelay = Math.min( driveRetryDelay * 2, DRIVE_RETRY_MAX_MS );
+				return;
+			}
+
+			driveRetryDelay = 400;
+
+			if ( 'advanced' === outcome ) {
+				renderResultsRunning();
+				driveOnce();
+			} else if ( 'done' === outcome ) {
+				driving = false;
+				renderResultsDone();
+			} else {
+				// 'stopped' -- the state changed out from under this loop
+				// (e.g. cancelled from another tab); render whatever it
+				// actually is now rather than assuming.
+				driving = false;
+				if ( 'paused' === jobState.status ) {
+					renderResultsPaused();
+				} else if ( 'done' === jobState.status ) {
+					renderResultsDone();
+				}
+			}
+		} ).catch( function ( err ) {
+			if ( ! driving ) {
+				return;
+			}
+			handleNetworkFailure( els.log, err );
+			driving = false;
+		} );
+	}
+
+	function showResultsBox() {
+		els.resultsBox.hidden = false;
+	}
+
+	// One "<format> vs. originals" tile per enabled format -- 1 tile on a
+	// server producing only one format (unlabelled, matching this page's
+	// original single-format wording exactly), one labelled tile per
+	// format side by side once more than one is active.
+	function renderBytesTiles() {
+		if ( ! els.cBytesTiles ) {
+			return;
+		}
+		els.cBytesTiles.innerHTML = '';
+		var formats = wwgAdmin.enabledFormats || [];
+		var labelled = formats.length > 1;
+
+		formats.forEach( function ( format ) {
+			var tile = document.createElement( 'div' );
+			tile.className = 'wwg-stat';
+
+			var value = document.createElement( 'span' );
+			value.className = 'wwg-stat-value';
+			value.textContent = formatBytes( jobState.stats[ format + '_bytes' ] ) + ' ' + wwgAdmin.strings.vsOriginal + ' ' + formatBytes( jobState.stats.original_bytes );
+			tile.appendChild( value );
+
+			var label = document.createElement( 'span' );
+			label.className = 'wwg-stat-label';
+			if ( labelled ) {
+				label.appendChild( buildFormatBadge( format ) );
+				label.appendChild( document.createTextNode( ' ' + wwgAdmin.strings.vsOriginals ) );
+			} else {
+				label.textContent = wwgAdmin.strings.newSizeVsOriginals;
+			}
+			tile.appendChild( label );
+
+			els.cBytesTiles.appendChild( tile );
+		} );
+	}
+
+	// Fills in everything renderResultsRunning()/Paused()/Done() share:
+	// the progress bar, the summary sentence, the stats grid, and the
+	// failures/recoveries lists. Each caller sets the dot/chip and log
+	// line itself, since those are the only parts that actually differ
+	// between running/paused/done.
+	function renderResultsCommon() {
+		var target = jobState.total_missing;
+		var processed = Math.min( jobState.stats.converted + jobState.stats.failed, target || 0 );
+		var pct = target ? Math.min( 100, Math.round( ( processed / target ) * 100 ) ) : 100;
+		els.progress.hidden = false;
+		els.progressFill.style.width = pct + '%';
+		els.progressLabel.textContent = pct + '% (' + processed + ' / ' + target + ' ' + wwgAdmin.strings.images + ')';
+
+		els.convertResults.hidden = false;
+		document.getElementById( 'wwg-c-failed' ).textContent = jobState.stats.failed;
+		renderBytesTiles();
+
+		renderFailuresInto( els.failuresList, els.failuresCount, els.failures, jobState.stats.failures );
+
+		var recoveries = jobState.stats.recoveries;
+		if ( recoveries.length ) {
+			els.recoveries.hidden = false;
+			els.recoveriesCount.textContent = recoveries.length;
+			var toShow = recoveries.slice( -50 );
+			els.recoveriesList.innerHTML = '';
+			toShow.forEach( function ( recovery ) {
+				var li = document.createElement( 'li' );
+				li.textContent = recovery.file;
+				els.recoveriesList.appendChild( li );
+			} );
+		} else {
+			els.recoveries.hidden = true;
+		}
+
+		// Once every missing image Scan found has been processed,
+		// converted/failed/bytes are final for this run, whether it's
+		// still running (walking the rest of the library for anything
+		// Scan might have missed -- bookkeeping, not more conversion
+		// work), paused, or done. A fact about the numbers, not the
+		// status -- deliberately NOT gated on jobState.status === 'running'
+		// (an earlier version of this was, which is exactly why Cancel
+		// mid-way-through-the-bookkeeping-phase still showed "so far"
+		// while paused: the running-only gate went false right as
+		// renderResultsPaused() called this, even though the numbers
+		// were already final by then).
+		var doneWithRealWork = jobState.total_missing > 0
+			&& ( jobState.stats.converted + jobState.stats.failed ) >= jobState.total_missing;
+
+		if ( doneWithRealWork ) {
+			els.summary.textContent = wwgAdmin.strings.generatedFinal.replace( '%d', jobState.stats.converted )
+				+ ( jobState.stats.failed > 0 ? ' ' + wwgAdmin.strings.failedSummary.replace( '%d', jobState.stats.failed ) : '' )
+				+ ( jobState.cache_cleared ? ' ' + wwgAdmin.strings.cacheClearedPast : '' );
+		} else {
+			els.summary.textContent = wwgAdmin.strings.generatedSoFar.replace( '%d', jobState.stats.converted );
+		}
+
+		return doneWithRealWork;
+	}
+
+	function renderResultsRunning() {
+		els.resultsBox.classList.remove( 'wwg-results-box--done' );
+		setStatusDot( els.resultsDot, 'live' );
+		setChipLabel( els.resultsChipLabel, 'live', wwgAdmin.strings.generatingLabel );
+
+		var doneWithRealWork = renderResultsCommon();
+
+		if ( jobState.current_dir ) {
+			els.log.hidden = false;
+			var template = doneWithRealWork ? wwgAdmin.strings.stillScanning : wwgAdmin.strings.converting;
+			els.log.textContent = template.replace( '%s', jobState.current_dir );
+		} else {
+			els.log.hidden = true;
+		}
+
+		updateActionButtons();
+	}
+
+	function renderResultsPaused() {
+		stopDriving();
+		els.resultsBox.classList.remove( 'wwg-results-box--done' );
+		setStatusDot( els.resultsDot, 'paused' );
+		setChipLabel( els.resultsChipLabel, 'paused', wwgAdmin.strings.pausedLabel );
+
+		renderResultsCommon();
+		els.log.hidden = false;
 		els.log.textContent = wwgAdmin.strings.paused;
 		// Progress bar / summary are left exactly where they were --
 		// paused, not reset or hidden.
+
+		updateActionButtons();
 	}
 
-	function finishGenerate() {
-		els.scanBtn.disabled = true;
-		els.generateBtn.disabled = true;
+	function renderResultsDone() {
+		stopDriving();
+		// Scan deliberately stays enabled here (unlike Generate/Cancel,
+		// which have nothing left to do): it always has been re-clickable
+		// any time now (see updateActionButtons()), and a completed
+		// Generate run is exactly when someone's most likely to want a
+		// fresh Library Status check.
+		els.resultsBox.classList.add( 'wwg-results-box--done' );
+		setStatusDot( els.resultsDot, 'done' );
+		setChipLabel( els.resultsChipLabel, 'done', wwgAdmin.strings.lastRunLabel.replace( '%s', formatDateTime( jobState.finished_at ) ) );
+
+		renderResultsCommon(); // sets els.summary to the final "N generated. M failed…" tally, cache-cleared note included.
+
+		// Nothing left to say here that the chip label and summary above
+		// don't already cover -- deliberately empty rather than a "Done."
+		// line that would need its own un-timestamped/timestamped split
+		// the way the chip already handles for free.
+		els.log.hidden = true;
+		els.log.textContent = '';
+
+		updateActionButtons();
+	}
+
+	function requestCancel() {
+		if ( 'running' !== jobState.status ) {
+			return;
+		}
+		// Stop the tight drive loop the instant Cancel is clicked, rather
+		// than waiting on this round-trip -- renderResultsPaused() also
+		// calls stopDriving(), but not until the response below lands.
+		stopDriving();
+		// Prevent repeat clicks while the in-flight request finishes.
 		els.cancelBtn.disabled = true;
 
-		els.log.textContent = wwgAdmin.strings.generateDone.replace( '%d', generateTotals.converted )
-			+ ( generateTotals.failed > 0 ? ' (' + generateTotals.failed + ' failed -- see error log)' : '' )
-			+ ( generateTotals.cacheCleared ? ' ' + wwgAdmin.strings.cacheCleared : '' );
+		requestJobAction( wwgAdmin.jobActions.cancel ).then( function ( json ) {
+			if ( ! json.success ) {
+				handleRequestFailure( els.log, json );
+				els.cancelBtn.disabled = false;
+				return;
+			}
+
+			jobState = json.data;
+			renderResultsPaused();
+		} ).catch( function ( err ) {
+			handleNetworkFailure( els.log, err );
+			els.cancelBtn.disabled = false;
+		} );
 	}
 
-	function handleRequestFailure( json ) {
-		running = false;
-		els.log.textContent = wwgAdmin.strings.error + ' ' + ( ( json.data && json.data.message ) || '' );
+	/**
+	 * Called once on page load -- makes both regions reflect whatever's
+	 * actually true server-side, instead of always booting to a blank
+	 * screen. This is what lets a mid-run reload, or coming back after
+	 * the job finished (or a scan completed) elsewhere, show up correctly
+	 * with no click required.
+	 */
+	function boot() {
+		renderStatusFromState();
+
+		if ( 'running' === jobState.status ) {
+			showResultsBox();
+			renderResultsRunning();
+			startDriving();
+		} else if ( 'paused' === jobState.status ) {
+			showResultsBox();
+			renderResultsPaused();
+		} else if ( 'done' === jobState.status ) {
+			showResultsBox();
+			renderResultsDone();
+		}
+		// 'idle': Generate Results box stays absent -- nothing has ever
+		// run yet, so there's no history to show.
 	}
 
-	function handleNetworkFailure( err ) {
-		running = false;
-		els.log.textContent = wwgAdmin.strings.error + ' ' + err;
+	function handleRequestFailure( logEl, json ) {
+		logEl.hidden = false;
+		logEl.textContent = wwgAdmin.strings.error + ' ' + ( ( json.data && json.data.message ) || '' );
+	}
+
+	function handleNetworkFailure( logEl, err ) {
+		logEl.hidden = false;
+		logEl.textContent = wwgAdmin.strings.error + ' ' + err;
 	}
 } )();

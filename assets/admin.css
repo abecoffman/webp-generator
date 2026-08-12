@@ -134,12 +134,137 @@ details summary {
 	font-size: 13px;
 }
 
+/* Sits under both quality sliders once more than one is shown -- explains
+ * the two numbers aren't on a perceptually-equivalent scale, without
+ * implying either slider needs a second look.
+ */
+.wwg-quality-note {
+	font-size: 12px;
+	color: #646970;
+	background: #f6f7f7;
+	border-radius: 4px;
+	padding: 8px 10px;
+	max-width: 420px;
+	margin: -6px 0 20px;
+}
+
 /* Generate WebP Images ---------------------------------------------- */
+
+/* Region 1 (Library Status) and Region 3 (Generate Results, once done)
+ * both use this same muted-box treatment -- it's the one visual signal
+ * for "settled/historical", the same #f6f7f7/#dcdcde tokens .wwg-code
+ * and the failures/recoveries lists already use elsewhere on this page.
+ * Region 3 stays on the plain white card background while actively
+ * running/paused (see .wwg-results-box below), so "live and unsettled"
+ * contrasts against "settled and historical" without needing a separate
+ * icon to explain it. Only the box-appearance properties are shared here
+ * -- margins differ by region/state, so each keeps its own rule below
+ * rather than fighting this one over them.
+ */
+.wwg-status-box,
+.wwg-results-box--done {
+	background: #f6f7f7;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	padding: 16px;
+}
+
+.wwg-status-box {
+	margin-bottom: 16px;
+}
+
+.wwg-status-header,
+.wwg-results-header {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	margin-bottom: 10px;
+}
+
+/* Semantic status color, deliberately reusing the same three colors the
+ * .htaccess syntax highlighting above already established for this page
+ * (blue=live, green=settled/good, amber=paused) rather than introducing
+ * a new accent -- kept separate from any "brand" color since this plugin
+ * doesn't have one.
+ */
+.wwg-status-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	flex: none;
+}
+
+.wwg-status-dot--idle {
+	background: #a7aaad;
+}
+
+.wwg-status-dot--live {
+	background: #2271b1;
+	box-shadow: 0 0 0 3px rgba(34, 113, 177, 0.15);
+}
+
+.wwg-status-dot--done {
+	background: #007017;
+}
+
+.wwg-status-dot--paused {
+	background: #ab5c00;
+}
+
+.wwg-status-chip-label {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: #8c8f94;
+}
+
+.wwg-status-chip-label--live {
+	color: #2271b1;
+}
+
+.wwg-status-chip-label--done {
+	color: #007017;
+}
+
+.wwg-status-chip-label--paused {
+	color: #ab5c00;
+}
+
+.wwg-status-headline {
+	font-size: 15px;
+	font-weight: 600;
+	line-height: 1.5;
+	margin: 0;
+}
+
+.wwg-status-meta {
+	font-size: 13px;
+	color: #646970;
+	margin: 4px 0 0;
+}
+
+/* Region 3 while running/paused -- a plain continuation of the card,
+ * deliberately NOT the muted box above (see the comment on
+ * .wwg-status-box/.wwg-results-box--done) -- only picks up that
+ * treatment once truly done.
+ */
+.wwg-results-box {
+	margin-top: 20px;
+	padding-top: 20px;
+	border-top: 1px solid #dcdcde;
+}
+
+.wwg-results-box--done {
+	margin-top: 20px;
+	margin-bottom: 0;
+	border-top: none;
+}
 
 .wwg-actions {
 	display: flex;
 	gap: 8px;
-	margin-bottom: 16px;
+	margin-bottom: 4px;
 }
 
 .wwg-progress {
@@ -191,6 +316,7 @@ details summary {
 .wwg-stat {
 	display: flex;
 	flex-direction: column;
+	min-width: 150px;
 }
 
 .wwg-stat--wide {
@@ -201,9 +327,13 @@ details summary {
 	font-size: 20px;
 	font-weight: 600;
 	line-height: 1.3;
+	font-variant-numeric: tabular-nums;
 }
 
 .wwg-stat-label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
 	font-size: 12px;
 	color: #646970;
 }
@@ -217,4 +347,192 @@ details summary {
 
 .wwg-log:empty {
 	display: none;
+}
+
+.wwg-failures {
+	margin: 4px 0 0;
+}
+
+.wwg-failures summary {
+	font-size: 13px;
+	font-weight: 600;
+	color: #646970;
+	margin-top: 0;
+}
+
+.wwg-failures-list {
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 4px 12px;
+	background: #f6f7f7;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	max-height: 200px;
+	overflow-y: auto;
+	font-size: 12px;
+	color: #50575e;
+}
+
+.wwg-failures-list li {
+	padding: 8px 0;
+}
+
+.wwg-failures-list li + li {
+	border-top: 1px solid #dcdcde;
+}
+
+.wwg-failure-file {
+	display: block;
+	font-weight: 600;
+}
+
+/* One badge per currently-failing enabled format on a row -- only shown
+ * at all once this site actually produces more than one format (see
+ * admin.js's shouldShowFormatBadges()); a single-format server never
+ * renders this, matching the plugin's original plain-text rows exactly.
+ */
+.wwg-failure-badges {
+	display: flex;
+	gap: 5px;
+	margin: 4px 0 0;
+}
+
+.wwg-chip {
+	display: inline-block;
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	padding: 1px 6px;
+	border-radius: 3px;
+	line-height: 1.6;
+}
+
+/* Distinct, muted tints per format -- not the semantic status colors
+ * (blue/green/amber/red) already established elsewhere on this page,
+ * since a badge here means "which format", not "how healthy".
+ */
+.wwg-chip--webp {
+	background: #e7f0f7;
+	color: #135e96;
+}
+
+.wwg-chip--avif {
+	background: #eaf3ea;
+	color: #00610f;
+}
+
+.wwg-failure-text {
+	display: block;
+	margin-top: 3px;
+}
+
+/* A file already proven unfixable (its original is also broken, or
+ * nothing in WordPress even references it) -- explains why no "Fix"
+ * button is offered, or (for a corrupt original itself) why deleting it
+ * takes the whole attachment with it.
+ */
+.wwg-failure-reason {
+	display: block;
+	margin: 3px 0 0;
+	color: #646970;
+	font-style: italic;
+}
+
+.wwg-failure-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 6px;
+}
+
+.wwg-failure-actions:empty {
+	display: none;
+}
+
+.wwg-row-btn {
+	font-size: 12px !important;
+	padding: 0 8px !important;
+	height: auto !important;
+	line-height: 2 !important;
+}
+
+/* Reserved for the one action in this panel that isn't reversible the
+ * way regenerating a thumbnail is -- deleting a corrupt *original*
+ * takes the whole attachment with it. Same red WP core itself uses for
+ * its own destructive actions (e.g. "Delete Permanently"), not a new
+ * color invented for this plugin.
+ */
+.wwg-row-btn--danger {
+	color: #b32d2e;
+	border-color: #b32d2e;
+	background: #fff;
+}
+
+.wwg-row-btn--danger:hover {
+	background: #fcf0f1;
+}
+
+.wwg-row-link {
+	font-family: inherit;
+	font-size: 12px;
+	color: #646970;
+	text-decoration: underline;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+}
+
+.wwg-row-link:hover {
+	color: #2271b1;
+}
+
+.wwg-failure-status {
+	display: block;
+	margin: 6px 0 0;
+	font-size: 12px;
+	color: #646970;
+}
+
+.wwg-failure-status--error {
+	color: #b32d2e;
+}
+
+.wwg-recoveries {
+	margin: 4px 0 0;
+}
+
+.wwg-recoveries summary {
+	font-size: 13px;
+	font-weight: 600;
+	color: #646970;
+	margin-top: 0;
+}
+
+.wwg-recoveries-note {
+	font-size: 12px;
+	color: #646970;
+	margin: 8px 0 0;
+}
+
+.wwg-recoveries-list {
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 4px 12px;
+	background: #f6f7f7;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	max-height: 200px;
+	overflow-y: auto;
+	font-size: 12px;
+	color: #50575e;
+}
+
+.wwg-recoveries-list li {
+	padding: 6px 0;
+}
+
+.wwg-recoveries-list li + li {
+	border-top: 1px solid #dcdcde;
 }

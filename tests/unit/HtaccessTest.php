@@ -67,12 +67,44 @@ class HtaccessTest extends TestCase {
 		}
 	}
 
-	// Note: install()/get_path() aren't covered by this lightweight tier
-	// -- both do a real require_once against wp-admin/includes/*.php,
-	// which only exists inside an actual WordPress install. That path
-	// (and that get_rule_lines() really is what ends up in .htaccess) was
-	// verified manually against a real Apache request instead -- see the
-	// project's memory notes for that session.
+	// Note: install()/get_path()/is_up_to_date() aren't covered by this
+	// lightweight tier -- all three do a real require_once against
+	// wp-admin/includes/*.php, which only exists inside an actual
+	// WordPress install. That path (and that get_rule_lines() really is
+	// what ends up in .htaccess) was verified manually against a real
+	// Apache request instead -- see the project's memory notes for that
+	// session.
+
+	/**
+	 * Runs against this machine's real GD (genuinely supports AVIF --
+	 * confirmed via FormatTest.php), matching this codebase's existing
+	 * philosophy of exercising real capability detection rather than
+	 * mocking it. The reverse case (AVIF genuinely unsupported, so its
+	 * block must be entirely absent) can't be exercised at this tier
+	 * without dependency-injecting WWG_Format's capability check, which
+	 * doesn't exist -- same structural limit as the note above.
+	 */
+	public function test_get_rule_lines_puts_avif_before_webp_and_gates_each_by_its_own_file_check() {
+		$lines = \WWG_Htaccess::get_rule_lines();
+		$text  = implode( "\n", $lines );
+
+		$this->assertStringContainsString( 'RewriteCond %{HTTP_ACCEPT} image/avif', $text );
+		$this->assertStringContainsString( 'RewriteCond %1.avif -f', $text );
+		$this->assertStringContainsString( "\$1.avif [T=image/avif,E=accept:1,L]", $text );
+		$this->assertStringContainsString( 'AddType image/avif .avif', $text );
+
+		// Best format wins: AVIF's whole RewriteCond/RewriteRule group
+		// must appear before WebP's, so a file with both siblings gets
+		// AVIF.
+		$avif_pos = strpos( $text, 'image/avif' );
+		$webp_pos = strpos( $text, 'image/webp' );
+		$this->assertLessThan( $webp_pos, $avif_pos );
+
+		// Each format is independently -f-gated -- one browser/file
+		// combination's fallback can't be broken by the other format's
+		// condition.
+		$this->assertStringContainsString( 'RewriteCond %1.webp -f', $text );
+	}
 
 	public function test_get_rule_html_never_leaks_an_unescaped_angle_bracket_from_directive_text() {
 		// Regression test for a real bug this session: raw <IfModule ...>

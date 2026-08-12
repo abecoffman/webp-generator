@@ -29,6 +29,11 @@ composer.lock
 /playwright-report/
 /test-results/
 
+# Playwright MCP browser-automation tool traces/screenshots (an AI
+# assistant's ad-hoc verification tooling, not this project's own E2E
+# tier -- that's /tests/e2e/, ignored separately above).
+/.playwright-mcp/
+
 # OS cruft
 .DS_Store
 
