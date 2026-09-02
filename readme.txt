@@ -4,7 +4,7 @@ Tags: webp, image optimization, performance, media, images
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.15.0
+Stable tag: 1.16.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -30,6 +30,7 @@ If your site runs Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, or L
 = Also included =
 
 * Each format can be turned on or off, and its quality set independently (1-100, default 80 for WebP, 85 for AVIF), from Settings -- WebP and AVIF aren't on a perceptually equivalent scale at the same number, so each gets its own slider, with per-use-case guidance (backgrounds, thumbnails, photography) shown right on the page.
+* The Media Library's list view shows each image's own WebP/AVIF status, with a one-click **Generate** right there for anything still missing one -- no trip to Tools needed for just one image.
 * Works with any uploads folder layout, not just WordPress's default year/month structure.
 * A handful of filters for developers: `wwg_scan_directories`, `wwg_clear_cache_for_attachment`, `wwg_clear_all_cache`, `wwg_attempt_recovery`, `wwg_allow_failure_actions`, `wwg_enabled_formats`.
 
@@ -77,6 +78,12 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 3. Settings: configurable quality per format.
 
 == Changelog ==
+
+= 1.16.0 =
+* Scan is gone as a separate step -- Generate's own first phase now counts the library itself, so there's one button, and it's never working from a possibly-stale prior count. Library Status is a real reference table now (image count and total size per format), living in its own card with a small "As of" badge showing when it was last confirmed accurate, and folds in Failed Conversions and Recovered-from-embedded-data too instead of duplicating them elsewhere.
+* The Media Library's list view now shows each image's own WebP/AVIF status, with a one-click **Generate** for anything still missing one.
+* Fixes a rare case where Library Status could get stuck showing stale numbers if a background WP-Cron tick finished counting the library before the browser's own polling caught up to it.
+* Generate now shows "Starting…" immediately on click instead of a blank progress line while it works out how big the job actually is.
 
 = 1.15.0 =
 * Adds AVIF alongside WebP -- generated automatically for every new upload the moment your server's Imagick or GD actually supports it, no setting to find or turn on. Fully integrated everywhere WebP already was: one Library status, one Scan/Generate pipeline, one Failed Conversions list (with a small format badge on any entry once more than one format is active), a per-format quality slider, and the `.htaccess` rewrite rule now serves AVIF first when both exist for a file, falling back to WebP, then the original. If your server gains AVIF support after the rule was already installed, the Rewrite Rules card notices and offers to update it. "Fix this file" now regenerates every currently-missing format for that file in one click, and "Delete this file" clears all of them together. A site that would rather control this itself can narrow (never widen) which formats are actually produced via the new `wwg_enabled_formats` filter.
