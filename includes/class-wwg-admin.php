@@ -17,14 +17,15 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class WWG_Admin {
 
-	const ACTION_CLASSIFY_FAILURES = 'wwg_classify_failures';
-	const ACTION_FIX_FAILURE       = 'wwg_fix_failure';
-	const ACTION_DELETE_FAILURE    = 'wwg_delete_failure';
-	const ACTION_SAVE_SETTINGS     = 'wwg_save_settings';
-	const NONCE_ACTION             = 'wwg_admin';
-	const HTACCESS_NONCE           = 'wwg_htaccess';
-	const CAPABILITY               = 'manage_options';
-	const PAGE_SLUG                = 'webp-generator';
+	const ACTION_CLASSIFY_FAILURES   = 'wwg_classify_failures';
+	const ACTION_FIX_FAILURE         = 'wwg_fix_failure';
+	const ACTION_DELETE_FAILURE      = 'wwg_delete_failure';
+	const ACTION_SAVE_SETTINGS       = 'wwg_save_settings';
+	const ACTION_GENERATE_ATTACHMENT = 'wwg_generate_attachment';
+	const NONCE_ACTION               = 'wwg_admin';
+	const HTACCESS_NONCE             = 'wwg_htaccess';
+	const CAPABILITY                 = 'manage_options';
+	const PAGE_SLUG                  = 'webp-generator';
 
 	/**
 	 * How many files list_images_in_dir() results process_batch() looks
@@ -211,7 +212,10 @@ class WWG_Admin {
 		add_action( 'wp_ajax_' . self::ACTION_FIX_FAILURE, array( $this, 'handle_fix_failure' ) );
 		add_action( 'wp_ajax_' . self::ACTION_DELETE_FAILURE, array( $this, 'handle_delete_failure' ) );
 		add_action( 'wp_ajax_' . self::ACTION_SAVE_SETTINGS, array( $this, 'handle_save_settings' ) );
+		add_action( 'wp_ajax_' . self::ACTION_GENERATE_ATTACHMENT, array( $this, 'handle_generate_attachment' ) );
 		add_action( 'admin_init', array( $this, 'maybe_handle_htaccess_action' ) );
+		add_filter( 'manage_media_columns', array( $this, 'add_compression_column' ) );
+		add_action( 'manage_media_custom_column', array( $this, 'render_compression_column' ), 10, 2 );
 	}
 
 	/**
@@ -325,6 +329,49 @@ class WWG_Admin {
 	 * @param string $hook Current admin page hook suffix.
 	 */
 	public function enqueue_assets( $hook ) {
+		// Media Library's list view (screen hook 'upload.php') needs the
+		// stylesheet for the "WebP/AVIF" column's .wwg-chip/.wwg-cc-*
+		// classes, plus (for anyone who could actually use it) a small
+		// standalone script for that column's own "Generate" button --
+		// see render_compression_column()'s 'partial' branch and
+		// assets/media-library.js. Deliberately its own tiny script, not
+		// assets/admin.js -- that file's whole closure is built around
+		// the Tools page's job/scan state, none of which exists here.
+		if ( 'upload.php' === $hook ) {
+			wp_enqueue_style(
+				'wwg-admin',
+				plugins_url( 'assets/admin.css', WWG_FILE ),
+				array(),
+				WWG_VERSION
+			);
+
+			if ( current_user_can( self::CAPABILITY ) ) {
+				wp_enqueue_script(
+					'wwg-media-library',
+					plugins_url( 'assets/media-library.js', WWG_FILE ),
+					array(),
+					WWG_VERSION,
+					true
+				);
+
+				$strings = self::get_strings();
+				wp_localize_script(
+					'wwg-media-library',
+					'wwgMediaLibrary',
+					array(
+						'ajaxUrl'        => admin_url( 'admin-ajax.php' ),
+						'generateAction' => self::ACTION_GENERATE_ATTACHMENT,
+						'nonce'          => wp_create_nonce( self::NONCE_ACTION ),
+						'strings'        => array(
+							'generating' => $strings['generatingLabel'],
+							'error'      => $strings['error'],
+						),
+					)
+				);
+			}
+			return;
+		}
+
 		if ( 'tools_page_' . self::PAGE_SLUG !== $hook ) {
 			return;
 		}
@@ -2128,5 +2175,300 @@ class WWG_Admin {
 			'done'        => false,
 			'skipped'     => false,
 		);
+	}
+
+	// ---- Media Library list-view "WebP/AVIF" column ----
+	//
+	// Deliberately not sortable, and nothing here is persisted -- every
+	// row's status is recomputed live, the same handful of file_exists()/
+	// filesize() checks the rest of this class already treats as cheap
+	// enough to run on every render (see classify_failure()'s own
+	// docblock for the identical reasoning). Sorting would need a real,
+	// permanent per-attachment record kept in sync on every conversion/
+	// fix/delete -- nothing in this plugin has ever needed that, and nor
+	// does simply reporting a fresh answer per page load.
+
+	/**
+	 * @param array $columns Existing Media Library list-table columns.
+	 * @return array
+	 */
+	public function add_compression_column( $columns ) {
+		$columns['wwg_compression'] = __( 'WebP/AVIF', 'webp-generator' );
+		return $columns;
+	}
+
+	/**
+	 * @param string $column_name The column being rendered -- fires for
+	 *                             every custom column, not just ours.
+	 * @param int    $post_id     Attachment ID.
+	 */
+	public function render_compression_column( $column_name, $post_id ) {
+		if ( 'wwg_compression' !== $column_name ) {
+			return;
+		}
+
+		$summary = $this->compression_summary_for_attachment( (int) $post_id );
+
+		if ( 'converted' === $summary['status'] || 'partial' === $summary['status'] ) {
+			// Badges only earn their keep once there's more than one
+			// format to tell apart -- on a single-format server every
+			// line would carry the identical one badge, uninformative
+			// clutter rather than a signal (mirrors admin.js's own
+			// shouldShowFormatBadges() on the Tools page).
+			$show_badges = count( $summary['formats'] ) > 1;
+
+			foreach ( $summary['formats'] as $format => $data ) {
+				$badge = $show_badges
+					? '<span class="wwg-chip wwg-chip--' . esc_attr( $format ) . '">' . esc_html( WWG_Format::label( $format ) ) . '</span> '
+					: '';
+
+				if ( ! empty( $data['complete'] ) ) {
+					echo '<div class="wwg-cc-line">'
+						. '<span class="wwg-cc-check" aria-hidden="true">&#10003;</span> '
+						. $badge // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- already HTML-escaped above (esc_attr()/esc_html() on every dynamic piece before being wrapped in <span> markup, or the empty string); a second esc_html() pass here would double-escape it.
+						. '<span class="wwg-cc-figure">' . esc_html( size_format( $data['bytes'] ) ) . '</span> '
+						/* translators: %d: percent smaller than the original file. */
+						. '<span class="wwg-cc-percent">' . esc_html( sprintf( __( '%d%% smaller', 'webp-generator' ), $data['saved_percent'] ) ) . '</span>'
+						. '</div>';
+				} else {
+					// Deliberately still one line per incomplete format
+					// (not one shared "Not converted yet" for the whole
+					// row) -- on a multi-format site this is exactly what
+					// tells "WebP is fine, AVIF just hasn't run yet"
+					// apart from "nothing has ever been converted here",
+					// which look identical without it.
+					echo '<div class="wwg-cc-line">'
+						. $badge // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- see the note above.
+						. '<span class="wwg-cc-status wwg-cc-status--muted">' . esc_html__( 'Not converted yet', 'webp-generator' ) . '</span>'
+						. '</div>';
+				}
+			}
+
+			// Only 'partial' -- never 'converted' (nothing to do) -- and
+			// only for someone who could actually use it: this column
+			// itself is visible to anyone who can see the Media Library,
+			// but clicking this hits an AJAX action gated the same way
+			// every other interactive surface in this plugin already is.
+			// Deliberately never offered for 'failed' below -- a known
+			// failure needs the real Fix/Delete recovery machinery on the
+			// Tools page, not a plain retry that would just fail the same
+			// way again with no explanation.
+			if ( 'partial' === $summary['status'] && current_user_can( self::CAPABILITY ) ) {
+				printf(
+					'<button type="button" class="button button-small wwg-row-btn wwg-cc-generate-btn" data-attachment-id="%d">%s</button>',
+					(int) $post_id,
+					esc_html__( 'Generate', 'webp-generator' )
+				);
+			}
+			return;
+		}
+
+		if ( 'failed' === $summary['status'] ) {
+			$tools_url = admin_url( 'tools.php?page=' . self::PAGE_SLUG );
+			echo '<span class="wwg-chip wwg-chip--failed">' . esc_html__( 'Failed', 'webp-generator' ) . '</span> '
+				. '<span class="wwg-cc-status wwg-cc-status--failed">' . esc_html__( 'A size couldn’t be converted.', 'webp-generator' ) . '</span>'
+				. '<a class="wwg-cc-link" href="' . esc_url( $tools_url ) . '">' . esc_html__( 'View in Failed Conversions →', 'webp-generator' ) . '</a>';
+			return;
+		}
+
+		// 'not_yet' (no format enabled on this server at all) / 'unsupported'
+		// (not a JPEG/PNG, or no usable attachment metadata) -- both render
+		// as a plain empty cell: nothing meaningful to report either way,
+		// and 'not_yet' would otherwise repeat the same message on every
+		// single row.
+	}
+
+	/**
+	 * AJAX: the Media Library List view's own single-image "Generate"
+	 * button (see render_compression_column()'s 'partial' branch above).
+	 * Unlike the Tools page's bulk Generate, there's no job/progress state
+	 * to track here -- one attachment's handful of files converts fast
+	 * enough to just do it synchronously and hand back the result.
+	 *
+	 * Responds with fresh HTML for the one column cell that changed,
+	 * rather than raw data the client would have to re-render itself --
+	 * render_compression_column() is the only place that ever decides
+	 * what that cell looks like, on a fresh page load or right after this
+	 * click alike.
+	 */
+	public function handle_generate_attachment() {
+		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
+
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
+		}
+
+		$attachment_id = isset( $_POST['attachment_id'] ) ? absint( $_POST['attachment_id'] ) : 0;
+		if ( ! $attachment_id || 'attachment' !== get_post_type( $attachment_id ) ) {
+			wp_send_json_error( array( 'message' => __( 'Something went wrong:', 'webp-generator' ) ), 400 );
+		}
+
+		$this->regenerate_attachment( $attachment_id );
+
+		ob_start();
+		$this->render_compression_column( 'wwg_compression', $attachment_id );
+		$html = ob_get_clean();
+
+		wp_send_json_success( array( 'html' => $html ) );
+	}
+
+	/**
+	 * Ensure every enabled format exists for one attachment's original and
+	 * every registered size -- the single-image counterpart to
+	 * process_batch()'s own per-file loop (~line 1984 above), sharing its
+	 * exact bookkeeping (forget_failure()/remember_failure()) so a result
+	 * from here is indistinguishable from one the Tools page's own
+	 * Generate would have found, whichever happens to surface it first.
+	 *
+	 * @param int $attachment_id
+	 */
+	private function regenerate_attachment( $attachment_id ) {
+		$metadata = wp_get_attachment_metadata( $attachment_id );
+		if ( empty( $metadata['file'] ) ) {
+			return;
+		}
+
+		$formats     = WWG_Format::enabled();
+		$upload_dir  = wp_get_upload_dir();
+		$base_dir    = trailingslashit( $upload_dir['basedir'] );
+		$created_any = false;
+
+		foreach ( $this->generator->get_source_files( $metadata ) as $abs_path ) {
+			if ( ! file_exists( $abs_path ) ) {
+				continue; // Gone from disk -- nothing here to convert.
+			}
+			$file_rel = ltrim( str_replace( $base_dir, '', $abs_path ), '/' );
+
+			foreach ( $this->generator->ensure_formats( $abs_path, $formats ) as $format => $outcome ) {
+				if ( 'exists' === $outcome['status'] ) {
+					continue;
+				}
+				if ( 'created' === $outcome['status'] ) {
+					$created_any = true;
+					$this->forget_failure( $file_rel, $format );
+					continue;
+				}
+				$this->remember_failure( $file_rel, $abs_path, $format, isset( $outcome['error'] ) ? $outcome['error'] : '' );
+			}
+		}
+
+		if ( $created_any ) {
+			WWG_Cache::clear_for_attachment( $attachment_id );
+		}
+	}
+
+	/**
+	 * Live per-attachment compression summary for the column above.
+	 * Cheap by construction -- one wp_get_attachment_metadata() call
+	 * (already warmed by the list table's own query) plus a handful of
+	 * file_exists()/filesize() stats against this one attachment's own
+	 * files, never a folder walk and never a decode.
+	 *
+	 * @param int $attachment_id
+	 * @return array {
+	 *     @type string $status         One of 'converted', 'partial',
+	 *                                  'failed', 'unsupported', 'not_yet'.
+	 *     @type int    $original_bytes Summed across the original + every
+	 *                                  registered size. Present only when
+	 *                                  status is 'converted'.
+	 *     @type array  $formats        format id => {bytes, saved_percent}.
+	 *                                  Present only when status is
+	 *                                  'converted'.
+	 * }
+	 */
+	private function compression_summary_for_attachment( $attachment_id ) {
+		if ( ! in_array( get_post_mime_type( $attachment_id ), WWG_Generator::SUPPORTED_MIME_TYPES, true ) ) {
+			return array( 'status' => 'unsupported' );
+		}
+
+		$formats = WWG_Format::enabled();
+		if ( empty( $formats ) ) {
+			return array( 'status' => 'not_yet' );
+		}
+
+		$metadata = wp_get_attachment_metadata( $attachment_id );
+		if ( empty( $metadata['file'] ) ) {
+			return array( 'status' => 'unsupported' );
+		}
+
+		$source_files = $this->generator->get_source_files( $metadata );
+		if ( empty( $source_files ) ) {
+			return array( 'status' => 'unsupported' );
+		}
+
+		$upload_dir = wp_get_upload_dir();
+		$base_dir   = trailingslashit( $upload_dir['basedir'] );
+
+		$original_bytes    = 0;
+		$format_bytes      = array_fill_keys( $formats, 0 );
+		$format_complete   = array_fill_keys( $formats, true );
+		$failed            = false;
+		$any_source_exists = false;
+
+		foreach ( $source_files as $abs_path ) {
+			if ( ! file_exists( $abs_path ) ) {
+				continue; // The source itself is gone -- nothing to report for it specifically.
+			}
+			$any_source_exists = true;
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish/become unreadable between the listing above and here; (int) cast already turns a false return into a harmless 0.
+			$original_bytes += (int) @filesize( $abs_path );
+			$file_rel        = ltrim( str_replace( $base_dir, '', $abs_path ), '/' );
+
+			foreach ( $formats as $format ) {
+				$target = WWG_Format::path_for( $format, $abs_path );
+				if ( $target && file_exists( $target ) ) {
+					// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+					$format_bytes[ $format ] += (int) @filesize( $target );
+					continue;
+				}
+				$format_complete[ $format ] = false;
+				if ( false !== $this->is_known_failure( $file_rel, $abs_path, $format ) ) {
+					$failed = true;
+				}
+			}
+		}
+
+		if ( ! $any_source_exists ) {
+			// Every one of this attachment's files -- original included --
+			// is missing from disk (moved/deleted outside WordPress; a
+			// real, if rare, data-integrity issue distinct from anything
+			// this plugin does). Nothing to honestly report -- specifically
+			// NOT "converted, 0 B, 0% smaller", which the loop above would
+			// otherwise trivially satisfy having never found anything to
+			// check at all.
+			return array( 'status' => 'unsupported' );
+		}
+
+		if ( $failed ) {
+			return array( 'status' => 'failed' );
+		}
+
+		// Per-format breakdown either way -- 'partial' and 'converted' both
+		// report exactly which formats are actually ready, rather than a
+		// single blanket status. A blanket "Not converted yet" can't tell
+		// "this format specifically hasn't run yet" apart from "nothing
+		// has ever been converted for this file at all" -- the former
+		// reads, confusingly, identically to the latter, which is exactly
+		// what made an already-converted WebP file look like it had been
+		// deleted the moment AVIF (a second format) simply hadn't caught
+		// up to it yet.
+		$result = array(
+			'status'         => in_array( false, $format_complete, true ) ? 'partial' : 'converted',
+			'original_bytes' => $original_bytes,
+			'formats'        => array(),
+		);
+		foreach ( $formats as $format ) {
+			if ( $format_complete[ $format ] ) {
+				$bytes                        = $format_bytes[ $format ];
+				$result['formats'][ $format ] = array(
+					'complete'      => true,
+					'bytes'         => $bytes,
+					'saved_percent' => $original_bytes > 0 ? (int) round( ( 1 - ( $bytes / $original_bytes ) ) * 100 ) : 0,
+				);
+			} else {
+				$result['formats'][ $format ] = array( 'complete' => false );
+			}
+		}
+		return $result;
 	}
 }

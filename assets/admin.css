@@ -894,3 +894,75 @@ details summary {
 	display: block;
 	margin-top: 3px;
 }
+
+/* Media Library list-view "WebP/AVIF" column -------------------------
+ * Lives on a completely different admin screen (Media Library, not
+ * Tools > WebP Generator), but deliberately reuses this same stylesheet
+ * and the exact .wwg-chip tokens above rather than starting a second
+ * visual language -- one plugin, one set of colors/badges.
+ */
+
+.wwg-cc-line {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 12px;
+	line-height: 1.8;
+	white-space: nowrap;
+}
+
+.wwg-cc-check {
+	color: #007017;
+	font-weight: 700;
+}
+
+.wwg-cc-figure {
+	font-variant-numeric: tabular-nums;
+	color: #50575e;
+}
+
+.wwg-cc-percent {
+	font-weight: 600;
+	color: #007017;
+}
+
+.wwg-cc-status {
+	display: block;
+	font-size: 12px;
+}
+
+.wwg-cc-status--muted {
+	color: #646970;
+}
+
+.wwg-cc-status--failed {
+	display: inline;
+	color: #b32d2e;
+}
+
+.wwg-cc-link {
+	display: block;
+	margin-top: 2px;
+	font-size: 11px;
+	color: #646970;
+	text-decoration: underline;
+}
+
+.wwg-cc-link:hover {
+	color: #2271b1;
+}
+
+/* The column's own "Generate" button (render_compression_column()'s
+ * 'partial' branch) -- reuses .wwg-row-btn verbatim (same small-button
+ * treatment the Tools page's Fix/Delete actions already use) for one
+ * plugin, one button style, rather than a second one just for this
+ * screen. Only the placement is specific to sitting under this column's
+ * own format lines.
+ */
+.wwg-cc-generate-btn {
+	margin-top: 4px;
+}
+
+.wwg-cc-generate-error {
+	margin-left: 6px;
+}
