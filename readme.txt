@@ -2,13 +2,13 @@
 Contributors: abecoffman
 Tags: webp, image optimization, performance, media, images
 Requires at least: 6.0
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 7.4
 Stable tag: 1.16.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Generates WebP (and AVIF, if your server supports it) versions of your images automatically, catches up your existing media library on demand, and helps your server actually serve them.
+Generates WebP and AVIF versions of your images automatically, catches up your existing library on demand, and helps your server serve them.
 
 == Description ==
 

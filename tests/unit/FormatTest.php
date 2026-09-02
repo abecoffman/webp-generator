@@ -9,12 +9,17 @@ use WWG\Tests\TestCase;
 use Brain\Monkey\Functions;
 
 /**
- * Runs against this machine's REAL GD (no Imagick here, confirmed via
- * class_exists( 'Imagick' ) === false) -- matches this codebase's existing
+ * Runs against whichever real backend (Imagick or GD) this machine
+ * actually has for WebP/AVIF -- matches this codebase's existing
  * philosophy of exercising real capability detection rather than mocking
- * it (see AdminBatchingTest.php's own "real GD/Imagick" tests). This
- * machine's GD has both imagewebp() and imageavif(), so both formats are
- * genuinely supported here.
+ * it (see AdminBatchingTest.php's own "real GD/Imagick" tests). Every
+ * assertion below only depends on "this machine genuinely supports both
+ * formats", never on which specific backend provides that support --
+ * WWG_Format::active_backend() prefers Imagick whenever it can actually
+ * encode a format, so which one wins is itself a real, portable machine
+ * difference (found the hard way: this file used to hardcode "GD",
+ * written against a machine with no Imagick at all, which broke the
+ * moment CI ran it on a runner whose Imagick handles WebP/AVIF too).
  *
  * @covers \WWG_Format
  */
@@ -78,15 +83,20 @@ class FormatTest extends TestCase {
 		$this->assertSame( 'heic', \WWG_Format::label( 'heic' ) );
 	}
 
-	public function test_has_support_reflects_this_machines_real_gd() {
+	public function test_has_support_reflects_this_machines_real_capability() {
 		$this->assertTrue( \WWG_Format::has_support( 'webp' ) );
 		$this->assertTrue( \WWG_Format::has_support( 'avif' ) );
 		$this->assertFalse( \WWG_Format::has_support( 'heic' ) );
 	}
 
-	public function test_active_backend_reports_gd_on_this_machine() {
-		$this->assertSame( 'GD', \WWG_Format::active_backend( 'webp' ) );
-		$this->assertSame( 'GD', \WWG_Format::active_backend( 'avif' ) );
+	public function test_active_backend_reports_a_real_backend_for_every_supported_format() {
+		// Which ONE backend wins (Imagick vs. GD) is itself a genuine,
+		// portable machine difference -- the only thing safe to assert
+		// across machines is that a real, named backend comes back for
+		// anything genuinely supported here, and none at all for a
+		// format neither backend has ever heard of.
+		$this->assertContains( \WWG_Format::active_backend( 'webp' ), array( 'Imagick', 'GD' ) );
+		$this->assertContains( \WWG_Format::active_backend( 'avif' ), array( 'Imagick', 'GD' ) );
 		$this->assertSame( '', \WWG_Format::active_backend( 'heic' ) );
 	}
 
@@ -159,9 +169,10 @@ class FormatTest extends TestCase {
 		// wwg_scan_state on record at all -- unlike this file's own
 		// set_up() default) with AVIF support gets AVIF only, not both,
 		// to avoid doubling storage/CPU for a format most browsers won't
-		// use once AVIF exists. This machine's real GD genuinely supports
-		// AVIF (see test_has_support_reflects_this_machines_real_gd()),
-		// so this is exercising the real capability check, not a mock of
+		// use once AVIF exists. This machine's real backend genuinely
+		// supports AVIF (see
+		// test_has_support_reflects_this_machines_real_capability()), so
+		// this is exercising the real capability check, not a mock of
 		// it -- there's no honest way to also test the "AVIF unsupported"
 		// branch here for the same reason AdminSettingsTest.php's own
 		// equivalent test doesn't exist (has_support() asks real
