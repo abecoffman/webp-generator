@@ -46,9 +46,30 @@ class WWG_Format {
 	const OPTION_QUALITY_AVIF = 'wwg_quality_avif';
 
 	/**
+	 * Deliberately higher than WebP's own default (80, see
+	 * WWG_Generator::DEFAULT_QUALITY) even though both options share the
+	 * same 1-100 range -- they're not on a perceptually equivalent scale
+	 * at the same number (see this file's own top-level docblock).
+	 *
 	 * @var int
 	 */
-	const DEFAULT_QUALITY_AVIF = 75;
+	const DEFAULT_QUALITY_AVIF = 85;
+
+	/**
+	 * Per-format "does the site owner actually want this generated at
+	 * all" option -- independent of both server support (has_support())
+	 * and the developer-only wwg_enabled_formats filter (see enabled()
+	 * below). See user_wants()'s own docblock for the default this falls
+	 * back to when never explicitly saved.
+	 *
+	 * @var string
+	 */
+	const OPTION_ENABLED_WEBP = 'wwg_enabled_webp';
+
+	/**
+	 * @var string
+	 */
+	const OPTION_ENABLED_AVIF = 'wwg_enabled_avif';
 
 	/**
 	 * Per-format metadata. A method rather than a class constant so it can
@@ -56,7 +77,7 @@ class WWG_Format {
 	 * entry without a class-constant-expression load-order dependency
 	 * between this file and class-wwg-generator.php.
 	 *
-	 * @return array<string,array{id:string,label:string,extension:string,mime:string,imagick_format:string,gd_function:string,quality_option:string,default_quality:int}>
+	 * @return array<string,array{id:string,label:string,extension:string,mime:string,imagick_format:string,gd_function:string,quality_option:string,default_quality:int,enabled_option:string}>
 	 */
 	private static function definitions() {
 		return array(
@@ -69,6 +90,7 @@ class WWG_Format {
 				'gd_function'     => 'imageavif',
 				'quality_option'  => self::OPTION_QUALITY_AVIF,
 				'default_quality' => self::DEFAULT_QUALITY_AVIF,
+				'enabled_option'  => self::OPTION_ENABLED_AVIF,
 			),
 			self::WEBP => array(
 				'id'              => self::WEBP,
@@ -82,6 +104,7 @@ class WWG_Format {
 				// exactly that, with zero migration needed.
 				'quality_option'  => WWG_Generator::OPTION_QUALITY,
 				'default_quality' => WWG_Generator::DEFAULT_QUALITY,
+				'enabled_option'  => self::OPTION_ENABLED_WEBP,
 			),
 		);
 	}
@@ -134,6 +157,65 @@ class WWG_Format {
 	}
 
 	/**
+	 * Whether the site owner has this format checked on in Settings --
+	 * independent of has_support() (a fact about the server, not a
+	 * choice) and the wwg_enabled_formats filter (a developer-only
+	 * override, see enabled() below).
+	 *
+	 * Default, when the option has genuinely never been saved: AVIF wins
+	 * outright on a *fresh* install where the server can produce it --
+	 * generating both by default doubles storage/CPU for a format most
+	 * visitors' browsers won't even use once AVIF exists (it's strictly
+	 * smaller/better than WebP at the same quality number). WebP defaults
+	 * on only when AVIF genuinely isn't an option, so a fresh install
+	 * still gets real compression, not silently nothing.
+	 *
+	 * Deliberately narrowed to fresh installs only (see fresh_install()
+	 * below) -- an already-running site has been generating both formats
+	 * this whole time under the old, unconditional true default, and
+	 * upgrading into this option's first release must never silently
+	 * change that just because someone saves an unrelated Settings field.
+	 * An established site keeps the plain true default until it
+	 * explicitly says otherwise.
+	 *
+	 * @param string $format One of self::WEBP/self::AVIF.
+	 * @return bool
+	 */
+	public static function user_wants( $format ) {
+		$def = self::get( $format );
+		if ( ! $def ) {
+			return false;
+		}
+
+		$default = true;
+		if ( self::WEBP === $format && self::fresh_install() ) {
+			$default = ! self::has_support( self::AVIF );
+		}
+
+		return (bool) get_option( $def['enabled_option'], $default );
+	}
+
+	/**
+	 * Best-effort "has this site actually used this plugin yet" signal --
+	 * used only to decide how far user_wants()'s smart default above
+	 * reaches; nothing else depends on this being perfectly precise.
+	 * Scan's own completion record is the closest thing this plugin has
+	 * to that: a real, non-expiring option (unlike WWG_Job's own run
+	 * state, which is a transient and can't be trusted not to have
+	 * simply expired on an established site that hasn't run Generate
+	 * recently). Imperfect for a site that's only ever relied on the
+	 * on-upload hook and never once visited Tools > WebP Generator --
+	 * accepted as a narrow edge case, weighed against getting every
+	 * genuinely fresh install wrong instead.
+	 *
+	 * @return bool
+	 */
+	private static function fresh_install() {
+		$scan_state = get_option( WWG_Admin::OPTION_SCAN_STATE, array() );
+		return empty( $scan_state['finished_at'] );
+	}
+
+	/**
 	 * Which backend will actually be used for a format, for display on the
 	 * Tools > WebP Generator readiness panel.
 	 *
@@ -161,7 +243,11 @@ class WWG_Format {
 	/**
 	 * The formats this plugin actually produces right now: whatever this
 	 * server's Imagick/GD can really encode, optionally narrowed further
-	 * by a developer.
+	 * by a developer, AND narrowed again by whatever the site owner has
+	 * actually checked on in Settings (see user_wants() above) -- three
+	 * independent gates, every one of which can only narrow, never widen,
+	 * so none of them can silently override either of the others into
+	 * producing something un-asked-for.
 	 *
 	 * @return string[] Format ids, PRIORITY order.
 	 */
@@ -175,7 +261,10 @@ class WWG_Format {
 		 * matter what this filter returns, so a misbehaving callback can't
 		 * cause broken files to be generated at scale. Return e.g.
 		 * array( 'webp' ) to force AVIF off even on a server that
-		 * supports it.
+		 * supports it. Deliberately still receives the raw,
+		 * server-supported list -- not also pre-narrowed by user_wants()
+		 * below -- so this filter's own contract is unaffected by whether
+		 * a Settings checkbox exists at all.
 		 *
 		 * @param string[] $supported Server-detected-supported formats, PRIORITY order.
 		 */
@@ -183,8 +272,12 @@ class WWG_Format {
 		if ( ! is_array( $filtered ) ) {
 			$filtered = $supported;
 		}
+		$filtered = array_values( array_intersect( self::PRIORITY, array_intersect( $filtered, $supported ) ) );
 
-		return array_values( array_intersect( self::PRIORITY, array_intersect( $filtered, $supported ) ) );
+		// The site owner's own choice, applied last and independently --
+		// see user_wants()'s own docblock for why this can never widen
+		// past what the two gates above already allowed.
+		return array_values( array_filter( $filtered, array( __CLASS__, 'user_wants' ) ) );
 	}
 
 	/**

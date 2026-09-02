@@ -65,6 +65,18 @@ class WWG_Job {
 	const LOCK_TTL = 2 * MINUTE_IN_SECONDS;
 
 	/**
+	 * How long handle_cancel_job() will wait (in microseconds) for a
+	 * batch already in flight to finish and release LOCK_KEY on its own,
+	 * before reading/writing state itself -- see its own docblock and
+	 * fresh_status()'s. Well under LOCK_TTL: this is bounding a single
+	 * batch's normal runtime, not covering for a crashed one (that's what
+	 * LOCK_TTL itself is for).
+	 *
+	 * @var int
+	 */
+	const CANCEL_LOCK_WAIT = 3 * 1000000;
+
+	/**
 	 * Slid forward on every write (not a fixed expiry) so a long-running
 	 * job on a large library can't have its own state expire mid-run, and
 	 * a finished-but-unseen completion notice survives a normal weekend
@@ -88,7 +100,9 @@ class WWG_Job {
 	/**
 	 * @param WWG_Admin $admin Supplies run_job_batch() during cron ticks,
 	 *                         get_strings() for the notice/heartbeat copy,
-	 *                         and mark_scan_state_stale() when a batch
+	 *                         save_scan_state() when a job's own counting
+	 *                         phase finishes walking the tree, and
+	 *                         mark_scan_state_stale() when a batch
 	 *                         actually converts something.
 	 */
 	public function __construct( WWG_Admin $admin ) {
@@ -144,10 +158,14 @@ class WWG_Job {
 				$state['status']      = 'running';
 				$state['finished_at'] = null;
 			} else {
-				$state                  = $this->default_state();
-				$state['status']        = 'running';
-				$state['total_missing'] = isset( $_POST['total_missing'] ) ? absint( $_POST['total_missing'] ) : 0;
-				$state['started_at']    = time();
+				// total_missing starts at 0, not client-supplied -- it's
+				// not knowable yet. The job's own counting phase (see
+				// process_one_batch()) fills it in once it's actually
+				// walked the tree, the same number Scan used to report
+				// ahead of time from a separate, potentially-stale run.
+				$state               = $this->default_state();
+				$state['status']     = 'running';
+				$state['started_at'] = time();
 			}
 
 			$this->write_state( $state );
@@ -203,11 +221,29 @@ class WWG_Job {
 	 * @return array {
 	 *     @type string $outcome One of:
 	 *       'locked'   - another process holds the lock; no work done.
-	 *       'stopped'  - state isn't 'running'; caller should stop.
+	 *       'stopped'  - state wasn't 'running' at entry, OR a real batch
+	 *                    of work (a directory walk or actual conversion)
+	 *                    just ran but the status changed out from under it
+	 *                    while that was in flight (see fresh_status()) --
+	 *                    either way, the caller should stop.
 	 *       'advanced' - one batch processed, job continues.
 	 *       'done'     - this batch finished the job.
 	 *     @type array  $state Fresh state for advanced/done/stopped;
 	 *                  last-known state for locked.
+	 *     @type array  $scan_state Present on the one tick where the
+	 *                  counting phase just finished (see the 'counting'
+	 *                  branch below) -- the freshly-persisted "Library
+	 *                  Status" snapshot, so the client can update Region 1
+	 *                  the instant this happens instead of it staying
+	 *                  frozen on its last "counting" render. Also present
+	 *                  on a 'stopped' found already-'done' at entry, as a
+	 *                  fallback for exactly that tick having been won by a
+	 *                  different process (WP-Cron's own run_tick(), racing
+	 *                  this one) -- otherwise this poll would have no way
+	 *                  to learn it. Absent everywhere else (a 'locked' /
+	 *                  paused 'stopped' / mid-run 'advanced' has nothing
+	 *                  new to report -- Library Status is frozen by design
+	 *                  until the next full count, see OPTION_SCAN_STATE).
 	 * }
 	 */
 	private function process_one_batch() {
@@ -227,27 +263,61 @@ class WWG_Job {
 			// don't reschedule; whatever stopped it already cleared the
 			// schedule itself.
 			delete_transient( self::LOCK_KEY );
-			return array(
+			$response = array(
 				'outcome' => 'stopped',
 				'state'   => $state,
 			);
+			if ( 'done' === $state['status'] ) {
+				// The job can finish via a completely different process
+				// than the one polling right now -- run_tick() (WP-Cron's
+				// own self-perpetuating safety net) keeps a job moving
+				// even with no browser tab open at all, so it can just as
+				// easily be the one that lands the counting-finished tick
+				// below (the one that normally hands back a fresh
+				// $scan_state) while THIS request, arriving a moment
+				// later, finds the job already done and never sees that
+				// response. Without this, Library Status would be stuck
+				// showing whatever it last knew -- stale, though never
+				// wrong in a way that looks broken (see get_scan_state()'s
+				// own self-invalidation for the case where the numbers
+				// actually did change) -- until an unrelated event
+				// happened to refresh it. A cheap read (one get_option()
+				// call), so there's no reason not to always double-check
+				// here rather than trust the one-tick handoff alone.
+				$response['scan_state'] = $this->admin->get_scan_state();
+			}
+			return $response;
 		}
 
-		$result = $this->admin->run_job_batch( $state['cursor']['dir_index'], $state['cursor']['file_offset'], 'convert' );
+		// Counting is a read-only pass -- the same walk the old standalone
+		// Scan did (file_exists() checks only, see process_batch()'s own
+		// 'scan' mode) -- before switching to the real conversion work
+		// below it once counting's own done handling (further down) flips
+		// this to 'converting'.
+		$mode   = 'counting' === $state['phase'] ? 'scan' : 'convert';
+		$result = $this->admin->run_job_batch( $state['cursor']['dir_index'], $state['cursor']['file_offset'], $mode );
 
 		$state['cursor']      = array(
 			'dir_index'   => $result['dir_index'],
 			'file_offset' => $result['file_offset'],
 		);
 		$state['current_dir'] = $result['dir'];
+		$state['total_dirs']  = $result['total_dirs'];
 
 		// 'missing_files' (process_batch()'s distinct-file headline count)
-		// is deliberately not merged here -- this job's own progress math
-		// (total_missing/started_at percentage) only ever needs the
-		// conversion-unit numbers below, and merging it too would double-
-		// count it across every batch this run makes rather than tracking
-		// a true running distinct-file total.
-		foreach ( array( 'scanned', 'missing', 'converted', 'failed', 'original_bytes', 'webp_bytes', 'avif_bytes' ) as $key ) {
+		// is safe to merge the same way as every key below: each batch's
+		// slice of files is a monotonically advancing, non-overlapping
+		// window (the cursor only ever moves forward within one run, and
+		// a 'locked' outcome above does no work and merges nothing), so
+		// summing it batch by batch gives a true running distinct-file
+		// total -- exactly the same reasoning that already makes
+		// 'original_bytes' (computed the same way, once per distinct
+		// file) safe to merge. This job's own progress math never reads
+		// it (total_missing/started_at only need the conversion-unit
+		// numbers), but WWG_Admin's Library Status region does, to keep
+		// its last-Scan snapshot's file count live while a run is
+		// resolving it (see admin.js's renderStatusLiveDuringJob()).
+		foreach ( array( 'scanned', 'missing', 'missing_files', 'converted', 'failed', 'original_bytes', 'original_bytes_total', 'webp_bytes', 'avif_bytes', 'webp_original_bytes', 'avif_original_bytes', 'webp_present', 'avif_present' ) as $key ) {
 			$state['stats'][ $key ] += $result['stats'][ $key ];
 		}
 
@@ -269,6 +339,77 @@ class WWG_Job {
 			$state['stats']['recoveries'] = array_slice(
 				array_merge( $state['stats']['recoveries'], $result['stats']['recoveries'] ),
 				-500
+			);
+		}
+
+		if ( $result['done'] && 'counting' === $state['phase'] ) {
+			// The read-only pass just finished walking the whole tree --
+			// persist exactly what the old standalone Scan used to persist
+			// (same shape: missing/missing_files/original_bytes/failures),
+			// so Region 1's "Library Status" is populated the moment
+			// counting completes, same as before. Also handed back in the
+			// response below (a key no other tick's response carries) --
+			// unlike the old standalone Scan, admin.js has no
+			// finishScan()-equivalent request of its own to learn this
+			// from; this transition tick's own response is the only place
+			// it can, so Region 1 can leave its "counting" render the
+			// instant this happens instead of staying frozen there.
+			$scan_state = $this->admin->save_scan_state( $state['stats'] );
+
+			if ( 0 === $state['stats']['missing'] ) {
+				// Nothing to convert -- finish the job right here rather
+				// than starting a converting phase with no work in it.
+				$state['status']      = 'done';
+				$state['finished_at'] = time();
+				$state['seen']        = false;
+				$this->write_state( $state );
+				delete_transient( self::LOCK_KEY );
+				return array(
+					'outcome'    => 'done',
+					'state'      => $state,
+					'scan_state' => $scan_state,
+				);
+			}
+
+			// Flip into the real conversion phase: the cursor and stats
+			// accumulated above described the counting walk, not the
+			// conversion work about to start, so both reset to a clean
+			// slate exactly like a brand new job's -- total_missing is the
+			// one number that survives, now measured firsthand instead of
+			// client-supplied from a possibly-stale prior Scan.
+			$state['total_missing'] = $state['stats']['missing'];
+			$state['phase']         = 'converting';
+			$state['cursor']        = array(
+				'dir_index'   => 0,
+				'file_offset' => 0,
+			);
+			$state['stats']         = $this->default_state()['stats'];
+
+			// Re-check the persisted status fresh, right before deciding to
+			// keep this 'running' and reschedule another tick -- see
+			// fresh_status()'s own docblock for why this specific spot
+			// matters (a Cancel can land while the counting walk above was
+			// still in flight).
+			$fresh_status = $this->fresh_status();
+			if ( 'running' !== $fresh_status ) {
+				$state['status'] = $fresh_status;
+				$this->write_state( $state );
+				delete_transient( self::LOCK_KEY );
+				return array(
+					'outcome'    => 'stopped',
+					'state'      => $state,
+					'scan_state' => $scan_state,
+				);
+			}
+
+			$this->write_state( $state );
+			delete_transient( self::LOCK_KEY );
+			$this->ensure_scheduled();
+
+			return array(
+				'outcome'    => 'advanced',
+				'state'      => $state,
+				'scan_state' => $scan_state,
 			);
 		}
 
@@ -296,6 +437,22 @@ class WWG_Job {
 			);
 		}
 
+		// Same re-check as the counting-phase flip above -- the real
+		// conversion work in run_job_batch() just above is the slow part
+		// (real image encoding, not a cheap file_exists() walk), so this
+		// is the spot with the widest window for a Cancel to land while
+		// it was running. See fresh_status()'s own docblock.
+		$fresh_status = $this->fresh_status();
+		if ( 'running' !== $fresh_status ) {
+			$state['status'] = $fresh_status;
+			$this->write_state( $state );
+			delete_transient( self::LOCK_KEY );
+			return array(
+				'outcome' => 'stopped',
+				'state'   => $state,
+			);
+		}
+
 		$this->write_state( $state );
 		delete_transient( self::LOCK_KEY );
 		$this->ensure_scheduled();
@@ -304,6 +461,33 @@ class WWG_Job {
 			'outcome' => 'advanced',
 			'state'   => $state,
 		);
+	}
+
+	/**
+	 * The persisted status, re-read fresh from the transient store rather
+	 * than trusted from whatever process_one_batch() read at its own
+	 * entry -- used right before it decides to keep a job 'running' (and
+	 * schedule another tick) after the slow part of a batch (a real
+	 * directory walk or real image encoding) has already run.
+	 *
+	 * This closes a real race: handle_cancel_job() doesn't hold LOCK_KEY,
+	 * so it can write 'paused' while a batch already past its own
+	 * 'running' check is still mid-flight. Without re-checking here, that
+	 * batch's own state -- fetched *before* the cancel, still saying
+	 * 'running' -- would silently overwrite the cancel's write when it
+	 * saves at the end, and then reschedule another tick on top of it,
+	 * resurrecting a job the user just told to stop (see
+	 * wwg-job-cancel-race-condition in project memory for how this was
+	 * first found: it let a real conversion run keep going for close to
+	 * an hour after Cancel appeared to succeed). The real work already
+	 * done by this batch (files actually written to disk, cursor/stats
+	 * already merged into $state by the caller) is kept either way --
+	 * only whether to call it 'running' and reschedule is in question.
+	 *
+	 * @return string
+	 */
+	private function fresh_status() {
+		return $this->get_state()['status'];
 	}
 
 	/**
@@ -318,14 +502,32 @@ class WWG_Job {
 			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
 		}
 
+		// Wait for any batch currently in flight to finish and release
+		// LOCK_KEY itself, rather than reading state while it might still
+		// be mid-write -- see fresh_status()'s own docblock for the race
+		// this closes. Bounded, not indefinite: a stuck/crashed lock
+		// (past LOCK_TTL) or a batch that's simply slow shouldn't hang
+		// this request forever -- worst case, the race this narrows is
+		// still far better than not waiting at all.
+		$waited = 0;
+		while ( get_transient( self::LOCK_KEY ) && $waited < self::CANCEL_LOCK_WAIT ) {
+			usleep( 100000 ); // 100ms.
+			$waited += 100000;
+		}
+
 		$state = $this->get_state();
 
 		if ( 'running' === $state['status'] ) {
 			wp_clear_scheduled_hook( self::CRON_HOOK );
-			delete_transient( self::LOCK_KEY );
 			$state['status'] = 'paused';
 			$this->write_state( $state );
 		}
+
+		// Deleted last, after our own write -- if we ever did time out
+		// the wait above, this still forces an immediately-resumable
+		// state (the original reason this was here at all) rather than
+		// leaving a stale lock around for its own LOCK_TTL.
+		delete_transient( self::LOCK_KEY );
 
 		wp_send_json_success( $state );
 	}
@@ -517,8 +719,24 @@ class WWG_Job {
 			return $this->default_state();
 		}
 
+		// Checked against the raw transient, before the merge below fills
+		// missing keys in from default_state() -- default_state()'s own
+		// 'phase' default ('counting') is only correct for a genuinely new
+		// job. A transient persisted before this field existed was, by
+		// definition, always mid-conversion: the old standalone Scan was a
+		// separate, already-completed step by the time a job could exist
+		// at all, so it never had a "counting" phase of its own to be mid-
+		// way through. Backfilling 'counting' for one of these via a blind
+		// merge would wrongly restart it counting from scratch instead of
+		// resuming the real conversion work it was actually doing.
+		$had_phase = array_key_exists( 'phase', $state );
+
 		$defaults = $this->default_state();
 		$state    = array_merge( $defaults, $state );
+
+		if ( ! $had_phase ) {
+			$state['phase'] = 'converting';
+		}
 
 		// Nested merge for 'stats' specifically -- the array_merge() above
 		// only guards missing top-level keys; a state transient persisted
@@ -633,20 +851,39 @@ class WWG_Job {
 	private function default_state() {
 		return array(
 			'status'        => 'idle',
+			// Every job now starts by counting (a scan-equivalent,
+			// read-only pass) before converting anything -- see
+			// process_one_batch()'s phase branch. 'converting' is never
+			// this default's own value; it only shows up via get_state()'s
+			// migration backfill for a transient persisted before this
+			// field existed (see get_state()'s own docblock).
+			'phase'         => 'counting',
+			// Populated from each batch's own run_job_batch() result while
+			// counting, so the client can render a "% (dir_index /
+			// total_dirs)" progress bar the same way the old standalone
+			// Scan did -- not knowable ahead of time the way it was when
+			// Scan tracked it purely client-side.
+			'total_dirs'    => 0,
 			'cursor'        => array(
 				'dir_index'   => 0,
 				'file_offset' => 0,
 			),
 			'stats'         => array(
-				'scanned'        => 0,
-				'missing'        => 0,
-				'converted'      => 0,
-				'failed'         => 0,
-				'original_bytes' => 0,
-				'webp_bytes'     => 0,
-				'avif_bytes'     => 0,
-				'failures'       => array(),
-				'recoveries'     => array(),
+				'scanned'              => 0,
+				'missing'              => 0,
+				'missing_files'        => 0,
+				'converted'            => 0,
+				'failed'               => 0,
+				'original_bytes'       => 0,
+				'original_bytes_total' => 0,
+				'webp_bytes'           => 0,
+				'avif_bytes'           => 0,
+				'webp_original_bytes'  => 0,
+				'avif_original_bytes'  => 0,
+				'webp_present'         => 0,
+				'avif_present'         => 0,
+				'failures'             => array(),
+				'recoveries'           => array(),
 			),
 			'total_missing' => 0,
 			'current_dir'   => '',

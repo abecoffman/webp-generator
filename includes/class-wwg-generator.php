@@ -37,12 +37,32 @@ class WWG_Generator {
 	const OPTION_QUALITY = 'wwg_quality';
 
 	/**
-	 * Default quality if the site hasn't set one -- matches what popular
-	 * WebP encoders (e.g. cwebp) default to.
+	 * Default quality if the site hasn't set one.
 	 *
 	 * @var int
 	 */
-	const DEFAULT_QUALITY = 75;
+	const DEFAULT_QUALITY = 80;
+
+	/**
+	 * A short, comma-separated list of the source formats this plugin
+	 * actually converts, e.g. "jpeg, png" -- derived from
+	 * SUPPORTED_MIME_TYPES itself (not a second hardcoded copy of the
+	 * same fact) so Library Status's "Original" row label in
+	 * admin-page.php stays accurate on its own if this list ever changes.
+	 *
+	 * @return string
+	 */
+	public static function supported_extensions_label() {
+		return implode(
+			', ',
+			array_map(
+				function ( $mime_type ) {
+					return str_replace( 'image/', '', $mime_type );
+				},
+				self::SUPPORTED_MIME_TYPES
+			)
+		);
+	}
 
 	/**
 	 * Human-readable reason the most recent failed conversion attempt
@@ -133,12 +153,14 @@ class WWG_Generator {
 
 	/**
 	 * Resolve the on-disk path of the original file plus every generated
-	 * size recorded in an attachment's metadata.
+	 * size recorded in an attachment's metadata. Public: WWG_Admin's Media
+	 * Library compression column reuses this exact mapping (attachment
+	 * metadata -> its source files) rather than duplicating it.
 	 *
 	 * @param array $metadata Attachment metadata.
 	 * @return string[] Absolute paths.
 	 */
-	private function get_source_files( $metadata ) {
+	public function get_source_files( $metadata ) {
 		$upload_dir = wp_get_upload_dir();
 		$base_dir   = trailingslashit( $upload_dir['basedir'] );
 		$subdir     = trailingslashit( dirname( $metadata['file'] ) );

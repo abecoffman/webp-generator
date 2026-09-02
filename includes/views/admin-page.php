@@ -1,7 +1,8 @@
 <?php
 /**
  * Tools > WebP Generator admin page shell. All the actual work happens
- * via AJAX (see assets/admin.js and WWG_Admin::handle_ajax()).
+ * via AJAX (see assets/admin.js and WWG_Job's start/status/drive/cancel
+ * endpoints).
  *
  * @package WWG
  */
@@ -10,27 +11,26 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-$enabled_formats = array();
+$enabled_formats   = array();
+$supported_formats = array();
 foreach ( $readiness['formats'] as $format ) {
 	if ( $format['enabled'] ) {
 		$enabled_formats[] = $format;
 	}
+	if ( $format['supported'] ) {
+		$supported_formats[] = $format;
+	}
 }
 $any_format_enabled = ! empty( $enabled_formats );
+// Distinct from $any_format_enabled: a format the site owner has simply
+// unchecked in Settings is still SUPPORTED -- the hard-stop "nothing here
+// will work" error further down is about server capability, not about
+// what's currently turned on, so it must gate on this, not that (see the
+// notice itself for why conflating the two would be actively wrong once
+// a real Settings checkbox exists).
+$any_format_supported = ! empty( $supported_formats );
 
-// One dynamic sentence reflecting what's actually happening, rather than
-// a static WebP-only one -- "WebP", "AVIF", or "WebP and AVIF" depending
-// on what this server can really produce. WWG_Format::PRIORITY order
-// (avif, webp) reads oddly in prose ("AVIF and WebP"), so this
-// deliberately lists WebP first here -- the two orderings serve different
-// purposes (best-match-wins for the rewrite rule vs. reads naturally as English).
-$format_labels_prose = wp_list_pluck( array_reverse( $enabled_formats ), 'label' );
-$format_list_and     = implode( ' ' . __( 'and', 'webp-generator' ) . ' ', $format_labels_prose );
-
-$card_heading = $any_format_enabled
-	/* translators: %s: format name(s), e.g. "WebP" or "WebP and AVIF". */
-	? sprintf( __( 'Generate %s Images', 'webp-generator' ), $format_list_and )
-	: __( 'Generate Images', 'webp-generator' );
+$card_heading = __( 'Bulk Image Backfill Utility', 'webp-generator' );
 
 $server_names = array(
 	'apache'    => 'Apache',
@@ -40,31 +40,37 @@ $server_names = array(
 	'unknown'   => __( 'your server', 'webp-generator' ),
 );
 $server_name  = $server_names[ $readiness['server_type'] ];
+
+// One shared use-case/quality table for the Settings card below, rather
+// than repeating the same three rows once per format -- columns are
+// whichever formats this server actually supports (not just currently
+// enabled ones: the table is reference material for deciding whether to
+// turn a format on in the first place, so it stays visible even for one
+// that's currently unchecked). Every format's quality_guide() has the
+// same tier labels in the same order (see WWG_Admin::quality_guide_for()),
+// only the numeric ranges differ, so zipping them by index is safe.
+$quality_table_columns = array();
+foreach ( $supported_formats as $format ) {
+	$quality_table_columns[ $format['id'] ] = $format['label'];
+}
+$quality_table_rows = array();
+if ( ! empty( $supported_formats ) ) {
+	$first_format_guide = reset( $supported_formats )['quality_guide'];
+	foreach ( $first_format_guide as $tier_index => $first_tier ) {
+		$row = array( 'label' => $first_tier['label'] );
+		foreach ( $supported_formats as $format ) {
+			$row[ $format['id'] ] = $format['quality_guide'][ $tier_index ]['range'];
+		}
+		$quality_table_rows[] = $row;
+	}
+}
+
 ?>
 <div class="wrap wwg-wrap">
 	<h1><?php esc_html_e( 'WebP Generator', 'webp-generator' ); ?></h1>
-	<p class="wwg-page-lede">
-		<?php if ( $any_format_enabled ) : ?>
-			<?php
-			printf(
-				/* translators: %s: format name(s), e.g. "a WebP version" or "a WebP and AVIF version". */
-				esc_html__( 'WordPress creates %s of every new image you upload automatically. Use this page to generate versions for images uploaded before that started, and to set up your server to actually serve them.', 'webp-generator' ),
-				/* translators: %s: format names joined with "and" if more than one, e.g. "WebP" or "WebP and AVIF". */
-				esc_html( sprintf( __( 'a %s version', 'webp-generator' ), $format_list_and ) )
-			);
-			?>
-		<?php else : ?>
-			<?php esc_html_e( 'WordPress creates a .webp version of every new image you upload automatically. Use this page to generate .webp versions for images uploaded before that started, and to set up your server to actually serve them.', 'webp-generator' ); ?>
-		<?php endif; ?>
-	</p>
-
-	<?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only: only decides which notice text to display, same as core's own options.php "settings-updated" check; the actual save already went through a real nonce check in WWG_Admin::maybe_save_settings() before this redirect happened. ?>
-	<?php if ( isset( $_GET['settings-updated'] ) ) : ?>
-		<div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Settings saved.', 'webp-generator' ); ?></p></div>
-	<?php endif; ?>
 
 	<?php
-	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only display lookup, not a write; see the note above the settings-updated check. The real nonce check already happened in WWG_Admin::maybe_handle_htaccess_action() before this redirect.
+	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only display lookup, not a write. The real nonce check already happened in WWG_Admin::maybe_handle_htaccess_action() before this redirect. (Settings itself no longer redirects at all -- see admin.js's wireSettingsAutosave() -- so there's no equivalent "settings-updated" query-arg notice here anymore.)
 	$htaccess_result  = isset( $_GET['wwg-htaccess'] ) ? sanitize_key( $_GET['wwg-htaccess'] ) : '';
 	$htaccess_notices = array(
 		'install-success' => array( 'success', __( '.htaccess updated -- the rewrite rule is now active.', 'webp-generator' ) ),
@@ -79,7 +85,7 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 		</div>
 	<?php endif; ?>
 
-	<?php if ( ! $any_format_enabled ) : ?>
+	<?php if ( ! $any_format_supported ) : ?>
 		<div class="notice notice-error">
 			<p>
 				<strong><?php esc_html_e( 'Nothing here will work yet.', 'webp-generator' ); ?></strong>
@@ -90,15 +96,17 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 		<?php
 		// A format the server genuinely can't encode gets no notice at
 		// all here (that's just this host's normal capability, nothing
-		// to act on) -- only a format that's SUPPORTED but not currently
-		// ENABLED (a wwg_enabled_formats filter is narrowing it) is worth
-		// a quiet, informational note, distinct from the hard-stop error
-		// above. No admin-facing toggle exists to turn it back on from
-		// here -- that's a deliberate developer-level decision this page
-		// only reports on, never overrides.
+		// to act on). A format the site owner simply unchecked in
+		// Settings below also gets none -- that's self-evident right
+		// there in the checkbox, not something to also announce up here.
+		// The only case still worth a quiet, informational note: the
+		// site owner's own checkbox says on, the server can do it, but a
+		// developer's wwg_enabled_formats filter is still overriding
+		// that -- otherwise checking the box would look like it did
+		// nothing, with no explanation why.
 		$filtered_off = array();
 		foreach ( $readiness['formats'] as $format ) {
-			if ( $format['supported'] && ! $format['enabled'] ) {
+			if ( $format['supported'] && $format['user_wants'] && ! $format['enabled'] ) {
 				$filtered_off[] = $format['label'];
 			}
 		}
@@ -118,53 +126,258 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 		<?php endif; ?>
 	<?php endif; ?>
 
+	<!-- Settings comes first: for someone installing this plugin fresh,
+		"which formats do I want, and at what quality" is the first real
+		decision to make -- it belongs ahead of Scan/Generate, not after
+		it. -->
+	<div class="wwg-card">
+		<div class="wwg-card-header">
+			<div class="wwg-card-title-row">
+				<h2><?php esc_html_e( 'Settings', 'webp-generator' ); ?></h2>
+				<?php if ( ! empty( $quality_table_rows ) ) : ?>
+					<!-- A sibling of the <h2>, not inside it -- a <table>
+						isn't valid heading content, and nesting one in
+						there would also make a screen reader announce the
+						whole table as part of the "Settings" heading's
+						name every time it's reached. .wwg-card-title-row's
+						own flex layout is what actually places this next
+						to the title visually. Hover/focus-revealed, not
+						shown inline -- the table is reference material for
+						deciding, not something that needs to sit
+						permanently on screen once a format's already set
+						up, and hiding it behind this is what keeps the
+						whole card down to just a checkbox+slider per
+						format. Pure CSS (:hover/:focus-within), no JS: a
+						keyboard user tabbing to the trigger opens it
+						exactly the same way a mouse hovering it does. -->
+					<div class="wwg-help">
+						<button type="button" class="wwg-help-trigger wwg-help-trigger--icon" aria-describedby="wwg-quality-help-tooltip">
+							<span class="dashicons dashicons-editor-help" aria-hidden="true"></span>
+							<span class="screen-reader-text"><?php esc_html_e( 'What quality should I use?', 'webp-generator' ); ?></span>
+						</button>
+						<div class="wwg-help-tooltip" id="wwg-quality-help-tooltip" role="tooltip">
+							<div class="wwg-quality-table-wrap">
+								<table class="wwg-quality-table">
+									<thead>
+										<tr>
+											<th scope="col"><?php esc_html_e( 'Quality Guidance', 'webp-generator' ); ?></th>
+											<?php foreach ( $quality_table_columns as $column_label ) : ?>
+												<th scope="col"><?php echo esc_html( $column_label ); ?></th>
+											<?php endforeach; ?>
+										</tr>
+									</thead>
+									<tbody>
+										<?php foreach ( $quality_table_rows as $row ) : ?>
+											<tr>
+												<th scope="row"><?php echo esc_html( $row['label'] ); ?></th>
+												<?php foreach ( $quality_table_columns as $column_id => $column_label ) : ?>
+													<td><?php echo esc_html( $row[ $column_id ] ); ?></td>
+												<?php endforeach; ?>
+											</tr>
+										<?php endforeach; ?>
+									</tbody>
+								</table>
+							</div>
+						</div>
+					</div>
+				<?php endif; ?>
+			</div>
+			<p class="wwg-card-lede"><?php esc_html_e( 'Auto applies to all new image uploads. A bulk backfill can be performed below.', 'webp-generator' ); ?></p>
+		</div>
+
+		<?php if ( $any_format_supported ) : ?>
+			<div class="wwg-settings-fields">
+				<!-- A thin bar, not a growing/shrinking line of text --
+					see wireSettingsAutosave() in admin.js. Absolutely
+					positioned (see .wwg-settings-fields's own
+					position:relative) so it never affects this card's
+					height, whether idle, saving, or just finished. -->
+				<div class="wwg-settings-save-indicator" id="wwg-settings-save-indicator" aria-hidden="true"></div>
+				<?php foreach ( $supported_formats as $format ) : ?>
+					<div class="wwg-field">
+						<label class="wwg-format-toggle" for="wwg-quality-<?php echo esc_attr( $format['id'] ); ?>">
+							<input
+								type="checkbox"
+								name="<?php echo esc_attr( $format['enabled_option'] ); ?>"
+								value="1"
+								class="wwg-format-checkbox"
+								data-controls="wwg-quality-row-<?php echo esc_attr( $format['id'] ); ?>"
+								<?php checked( $format['enabled'] ); ?>
+							/>
+							<?php echo esc_html( sprintf( /* translators: %s: format label, e.g. "WebP". */ __( 'Generate %s', 'webp-generator' ), $format['label'] ) ); ?>
+						</label>
+
+						<div class="wwg-quality-row" id="wwg-quality-row-<?php echo esc_attr( $format['id'] ); ?>">
+							<div class="wwg-quality-control">
+								<?php
+								// The slider's own min="50" -- below that, files
+								// get noticeably smaller but the compression
+								// starts showing on real photos, so this plugin
+								// doesn't offer it as an interactive default.
+								// The number field next to it stays min="1" on
+								// purpose, not 50: a site that already set
+								// something lower (from before this control
+								// existed) can keep it without a validation
+								// error blocking every future save -- see
+								// WWG_Admin::handle_save_settings()'s own
+								// [1,100] clamp, unchanged. The slider just can't
+								// *visually* represent anything under 50; typing
+								// a lower number into the field is still exactly
+								// as effective as it always was.
+								?>
+								<input
+									type="range"
+									id="wwg-quality-<?php echo esc_attr( $format['id'] ); ?>"
+									min="50" max="100"
+									value="<?php echo esc_attr( max( 50, min( 100, (int) $format['quality'] ) ) ); ?>"
+									class="wwg-quality-range"
+									data-paired-with="wwg-quality-<?php echo esc_attr( $format['id'] ); ?>-exact"
+								/>
+								<input
+									type="number"
+									id="wwg-quality-<?php echo esc_attr( $format['id'] ); ?>-exact"
+									name="<?php echo esc_attr( $format['option_name'] ); ?>"
+									min="1" max="100"
+									value="<?php echo esc_attr( $format['quality'] ); ?>"
+									class="small-text wwg-quality-number"
+									aria-label="<?php echo esc_attr( sprintf( /* translators: %s: format label, e.g. "WebP". */ __( 'Exact %s quality value', 'webp-generator' ), $format['label'] ) ); ?>"
+								/>
+							</div>
+						</div>
+					</div>
+				<?php endforeach; ?>
+				<!-- No Save button -- see admin.js's wireSettingsAutosave(),
+					which saves on every checkbox/quality change. Visually
+					hidden -- the indicator bar above is the sighted
+					feedback -- but still announced to screen readers,
+					which have no equivalent way to notice a silent color
+					flash. -->
+				<p class="screen-reader-text" id="wwg-settings-save-status" aria-live="polite"></p>
+			</div>
+		<?php else : ?>
+			<p class="wwg-status-detail--muted"><?php esc_html_e( 'No quality setting to show -- this server can\'t currently produce any of the formats this plugin supports.', 'webp-generator' ); ?></p>
+		<?php endif; ?>
+	</div>
+
+	<!-- Library Status -- known current state, always present (even
+		before Generate has ever run) and its own top-level card: it's a
+		fact about the library itself, not about the backfill tool below
+		it, so it doesn't need that tool's actions/progress UI nested
+		around it to make sense on its own. Rendered entirely by admin.js
+		from wwgAdmin.scanState, a snapshot of the last completed counting
+		pass (Generate's own first phase) that survives a reload -- see
+		WWG_Admin::OPTION_SCAN_STATE. -->
+	<div class="wwg-card">
+		<div class="wwg-card-header">
+			<h2><?php esc_html_e( 'Library Status', 'webp-generator' ); ?></h2>
+			<p class="wwg-card-lede"><?php esc_html_e( "What's currently true about your media library, as of the last completed scan.", 'webp-generator' ); ?></p>
+		</div>
+
+		<div id="wwg-status-box">
+			<div id="wwg-status-idle">
+				<p class="wwg-status-headline" id="wwg-status-headline"></p>
+				<p class="wwg-status-meta" id="wwg-status-meta"></p>
+			</div>
+
+			<!-- The complete picture, not just what's missing: how many
+				images exist in each form, and their total size --
+				library-wide, not scoped to any one run. Only shown once
+				a count has ever completed (same gate as the headline/
+				meta above). hidden lives on the <table> itself, not this
+				wrap -- the wrap is just an overflow-x safety net (same
+				pattern as .wwg-quality-table-wrap elsewhere on this
+				page), always present. -->
+			<div class="wwg-library-table-wrap">
+				<table class="wwg-library-table" id="wwg-status-table" hidden>
+					<thead>
+						<tr>
+							<!-- Otherwise-empty corner cell (no row-label column
+								needs a heading of its own) -- put to use for a
+								small "As of <date>" badge instead, the same
+								fact this table's own numbers are stamped with
+								(scanState.finished_at), rather than leaving
+								that much blank space unused. Built by admin.js
+								(renderStatusDone()); hidden lives on the badge
+								itself, same pattern as #wwg-status-table. -->
+							<th scope="col"><span class="wwg-as-of-badge" id="wwg-status-as-of" hidden></span></th>
+							<th scope="col"><?php esc_html_e( 'Images', 'webp-generator' ); ?></th>
+							<th scope="col"><?php esc_html_e( 'Total size', 'webp-generator' ); ?></th>
+						</tr>
+					</thead>
+					<tbody>
+						<tr>
+							<th scope="row">
+							<?php
+							printf(
+								/* translators: %s: comma-separated list of source image formats this plugin actually converts, e.g. "jpeg, png" -- see WWG_Generator::supported_extensions_label(). */
+								esc_html__( 'Original (%s)', 'webp-generator' ),
+								esc_html( WWG_Generator::supported_extensions_label() )
+							);
+							?>
+						</th>
+							<td id="wwg-status-original-count">–</td>
+							<td id="wwg-status-original-size">–</td>
+						</tr>
+					</tbody>
+					<!-- One row per enabled format, built by admin.js
+						(renderLibraryTable()) from wwgAdmin.enabledFormats --
+						a second <tbody>, not more <tr>s in the one above, so
+						the Original row (always present) is never mistaken
+						for one admin.js owns. -->
+					<tbody id="wwg-status-format-rows"></tbody>
+				</table>
+			</div>
+
+			<!-- The single Failed Conversions list -- used to also be
+				duplicated here and in the backfill tool's own results
+				below, showing two different snapshots. Lives here now:
+				it's a fact about the library's current state, not about
+				any one run, and stays live (sourced from the active job's
+				own in-progress failures) while a run is actually happening
+				-- see renderFailuresInto()'s call site in admin.js. -->
+			<details class="wwg-failures" id="wwg-status-failures" hidden>
+				<summary>
+					<?php esc_html_e( 'Failed conversions', 'webp-generator' ); ?>
+					(<span id="wwg-status-failures-count">0</span>)
+				</summary>
+				<ul class="wwg-failures-list" id="wwg-status-failures-list"></ul>
+			</details>
+
+			<!-- Last Run's own outcome sentence -- "N generated, N still
+				missing a format", not its date (that moved into the
+				table's own "As of" badge above -- see #wwg-status-as-of --
+				since it's a fact about the table, not about this
+				specifically). Folded in here from what used to be its own
+				separate box; only shown once a Generate run has actually
+				finished AND actually had something to report (see
+				buildRunSummaryText()/renderResultsDone() in admin.js,
+				which populates this instead of showing the backfill
+				tool's own results box for that state) -- empty (nothing
+				to report) collapses this away entirely rather than
+				showing a blank line. -->
+			<p class="wwg-status-meta" id="wwg-status-last-run" hidden></p>
+
+			<details class="wwg-recoveries" id="wwg-recoveries" hidden>
+				<summary>
+					<?php esc_html_e( 'Recovered from embedded data', 'webp-generator' ); ?>
+					(<span id="wwg-recoveries-count">0</span>)
+				</summary>
+				<p class="wwg-recoveries-note"><?php esc_html_e( 'A derived file was created successfully for each entry below, but the original itself still has stray bytes before the real image data starts -- worth a look (or re-exporting from the source) if you still have it.', 'webp-generator' ); ?></p>
+				<ul class="wwg-recoveries-list" id="wwg-recoveries-list"></ul>
+			</details>
+		</div>
+	</div>
+
 	<div class="wwg-card">
 		<div class="wwg-card-header">
 			<h2><?php echo esc_html( $card_heading ); ?></h2>
-			<p class="wwg-card-lede"><?php esc_html_e( 'Scan your media library for images missing a converted version, then generate them.', 'webp-generator' ); ?></p>
+			<p class="wwg-card-lede"><?php esc_html_e( 'Generate versions for images uploaded before automatic conversion, or before a format was turned on.', 'webp-generator' ); ?></p>
 		</div>
 
 		<div class="wwg-panel" data-any-format-enabled="<?php echo $any_format_enabled ? '1' : '0'; ?>">
 
-			<!-- Region 1: Library Status -- known current state, always
-				present (even before any scan has ever run). Rendered
-				entirely by admin.js from wwgAdmin.scanState, a snapshot
-				of Scan's last completed pass that survives a reload --
-				see WWG_Admin::OPTION_SCAN_STATE. -->
-			<div class="wwg-status-box" id="wwg-status-box">
-				<div class="wwg-status-header">
-					<span class="wwg-status-dot" id="wwg-status-dot"></span>
-					<span class="wwg-status-chip-label" id="wwg-status-chip-label"><?php esc_html_e( 'Library status', 'webp-generator' ); ?></span>
-				</div>
-
-				<div id="wwg-status-idle">
-					<p class="wwg-status-headline" id="wwg-status-headline"></p>
-					<p class="wwg-status-meta" id="wwg-status-meta"></p>
-				</div>
-
-				<div id="wwg-status-progress" class="wwg-progress" hidden>
-					<div class="wwg-progress-bar">
-						<div class="wwg-progress-bar-fill"></div>
-					</div>
-					<p class="wwg-progress-label"></p>
-				</div>
-				<p class="wwg-log" id="wwg-status-log" aria-live="polite" hidden></p>
-
-				<details class="wwg-failures" id="wwg-status-failures" hidden>
-					<summary>
-						<?php esc_html_e( 'Failed conversions', 'webp-generator' ); ?>
-						(<span id="wwg-status-failures-count">0</span>)
-					</summary>
-					<ul class="wwg-failures-list" id="wwg-status-failures-list"></ul>
-				</details>
-			</div>
-
-			<!-- Region 2: Actions -- available now. Never lives inside
-				either status box. -->
+			<!-- Actions -- available now. -->
 			<div class="wwg-actions">
-				<button type="button" class="button button-primary" id="wwg-scan"<?php echo $any_format_enabled ? '' : ' disabled'; ?>>
-					<?php esc_html_e( 'Scan', 'webp-generator' ); ?>
-				</button>
 				<button type="button" class="button button-primary" id="wwg-generate" disabled<?php echo $any_format_enabled ? '' : ' disabled'; ?>>
 					<?php esc_html_e( 'Generate', 'webp-generator' ); ?>
 				</button>
@@ -173,52 +386,53 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 				</button>
 			</div>
 
-			<!-- Region 3: Generate Results -- absent until Generate has
-				ever run (admin.js unhides it); live progress while
-				running/paused, settling into a dated "last run" record
-				once done (WWG_Job's persisted state, unchanged). -->
+			<!-- One shared progress bar -- a single physical position used
+				by BOTH phases of a running job (counting, then converting),
+				so it never visually jumps position when the job switches
+				from one to the other; only its own fill/label and what's
+				currently driving it change (see renderStatusScanning()/
+				renderResultsCommon() in admin.js).
+
+				#wwg-progress-status is the "what's actively happening"
+				dot+label -- ONLY for the counting phase, sitting right
+				above the bar it's about; Library Status (its own card,
+				above) never changes for this -- it's the library's own
+				last-known status, not this run's. Once converting starts,
+				the results box below becomes visible and its own header
+				takes over that same job -- this one hides rather than
+				showing alongside it. -->
+			<div class="wwg-progress-status" id="wwg-progress-status" hidden>
+				<span class="wwg-status-dot" id="wwg-progress-dot"></span>
+				<span class="wwg-status-chip-label" id="wwg-progress-chip-label"></span>
+			</div>
+			<div id="wwg-progress" class="wwg-progress" hidden>
+				<div class="wwg-progress-bar">
+					<div class="wwg-progress-bar-fill"></div>
+				</div>
+				<p class="wwg-progress-label"></p>
+			</div>
+			<!-- "What's happening right now" (which folder is currently
+				being walked, or the "Paused" message) -- belongs right
+				next to the progress bar it explains, not trailing after
+				the results box's cumulative summary/failures/recoveries
+				below. -->
+			<p class="wwg-log" id="wwg-log" aria-live="polite" hidden></p>
+
+			<!-- Live Generate progress only -- absent until real
+				conversion work has started (admin.js unhides it), and
+				hidden again once the run settles: there's no separate
+				"done" state here at all -- that's folded into the bottom
+				of Library Status's card above instead (see
+				#wwg-status-last-run and renderResultsDone() in admin.js).
+				While actually running/paused, though, this is still where
+				that live activity shows. -->
 			<div class="wwg-results-box" id="wwg-results-box" hidden>
 				<div class="wwg-results-header">
 					<span class="wwg-status-dot" id="wwg-results-dot"></span>
 					<span class="wwg-status-chip-label" id="wwg-results-chip-label"></span>
 				</div>
 
-				<div id="wwg-progress" class="wwg-progress" hidden>
-					<div class="wwg-progress-bar">
-						<div class="wwg-progress-bar-fill"></div>
-					</div>
-					<p class="wwg-progress-label"></p>
-				</div>
-
 				<p id="wwg-summary" class="wwg-summary"></p>
-
-				<div class="wwg-stats" id="wwg-convert-results" hidden>
-					<div class="wwg-stat">
-						<span class="wwg-stat-value" id="wwg-c-failed">–</span>
-						<span class="wwg-stat-label"><?php esc_html_e( 'Failed', 'webp-generator' ); ?></span>
-					</div>
-					<!-- One "<format> vs. originals" tile per enabled format, built by admin.js from wwgAdmin.enabledFormats/formatLabels -- 1 tile on a single-format server, 2 side by side when both WebP and AVIF are active. -->
-					<div id="wwg-c-bytes-tiles"></div>
-				</div>
-
-				<details class="wwg-failures" id="wwg-failures" hidden>
-					<summary>
-						<?php esc_html_e( 'Failed conversions', 'webp-generator' ); ?>
-						(<span id="wwg-failures-count">0</span>)
-					</summary>
-					<ul class="wwg-failures-list" id="wwg-failures-list"></ul>
-				</details>
-
-				<details class="wwg-recoveries" id="wwg-recoveries" hidden>
-					<summary>
-						<?php esc_html_e( 'Recovered from embedded data', 'webp-generator' ); ?>
-						(<span id="wwg-recoveries-count">0</span>)
-					</summary>
-					<p class="wwg-recoveries-note"><?php esc_html_e( 'A derived file was created successfully for each entry below, but the original itself still has stray bytes before the real image data starts -- worth a look (or re-exporting from the source) if you still have it.', 'webp-generator' ); ?></p>
-					<ul class="wwg-recoveries-list" id="wwg-recoveries-list"></ul>
-				</details>
-
-				<p class="wwg-log" id="wwg-log" aria-live="polite" hidden></p>
 			</div>
 		</div>
 	</div>
@@ -298,40 +512,5 @@ $server_name  = $server_names[ $readiness['server_type'] ];
 			<?php // phpcs:enable Squiz.PHP.EmbeddedPhp.ContentBeforeOpen, Squiz.PHP.EmbeddedPhp.ContentAfterEnd ?>
 			<p class="wwg-status-detail--muted"><?php esc_html_e( 'On Nginx, IIS, or another server: same idea (serve the best derived sibling that exists and the browser accepts, falling back through AVIF, then WebP, then the original), different syntax.', 'webp-generator' ); ?></p>
 		</details>
-	</div>
-
-	<div class="wwg-card">
-		<div class="wwg-card-header">
-			<h2><?php esc_html_e( 'Settings', 'webp-generator' ); ?></h2>
-			<p class="wwg-card-lede"><?php esc_html_e( 'Applies to images converted from now on -- existing files are never regenerated automatically.', 'webp-generator' ); ?></p>
-		</div>
-
-		<?php if ( $any_format_enabled ) : ?>
-			<form method="post">
-				<?php wp_nonce_field( WWG_Admin::SETTINGS_NONCE ); ?>
-				<?php foreach ( $enabled_formats as $format ) : ?>
-					<div class="wwg-field">
-						<label for="wwg-quality-<?php echo esc_attr( $format['id'] ); ?>">
-							<?php echo esc_html( sprintf( /* translators: %s: format label, e.g. "WebP". */ __( '%s quality', 'webp-generator' ), $format['label'] ) ); ?>
-						</label>
-						<p class="wwg-field-description"><?php esc_html_e( '1-100. Higher looks better but produces larger files; 75 is a reasonable default.', 'webp-generator' ); ?></p>
-						<input
-							type="number"
-							id="wwg-quality-<?php echo esc_attr( $format['id'] ); ?>"
-							name="<?php echo esc_attr( $format['option_name'] ); ?>"
-							min="1" max="100"
-							value="<?php echo esc_attr( $format['quality'] ); ?>"
-							class="small-text"
-						/>
-					</div>
-				<?php endforeach; ?>
-				<?php if ( count( $enabled_formats ) > 1 ) : ?>
-					<p class="wwg-quality-note"><?php esc_html_e( "These quality scales aren't perceptually equivalent at the same number -- AVIF at a given number often looks better and smaller than WebP at that same number. Each is independent; adjust to taste.", 'webp-generator' ); ?></p>
-				<?php endif; ?>
-				<button type="submit" name="wwg_save_settings" value="1" class="button"><?php esc_html_e( 'Save settings', 'webp-generator' ); ?></button>
-			</form>
-		<?php else : ?>
-			<p class="wwg-status-detail--muted"><?php esc_html_e( 'No quality setting to show -- this server can\'t currently produce any of the formats this plugin supports.', 'webp-generator' ); ?></p>
-		<?php endif; ?>
 	</div>
 </div>

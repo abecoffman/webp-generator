@@ -1,5 +1,5 @@
 /* [hidden] must always win over any element that also sets its own
- * `display` (e.g. .wwg-stats below) -- otherwise equal-specificity plus
+ * `display` (e.g. .wwg-progress-status below) -- otherwise equal-specificity plus
  * source order lets the later rule silently override the browser's
  * default [hidden] { display: none }, leaving a "hidden" element
  * visible. Caught by actually screenshotting the rendered page, not by
@@ -117,64 +117,322 @@ details summary {
  * a single setting (or even a handful), which is the common case here.
  */
 
-.wwg-field {
-	margin-bottom: 16px;
-	max-width: 400px;
-}
-
-.wwg-field label {
-	display: block;
-	font-weight: 600;
+/* h2 + help icon on one line -- see .wwg-help below for the icon/tooltip
+ * itself. The card-lede sits under this whole row, not just under the
+ * heading text, so its own top spacing lives here rather than on the h2.
+ */
+.wwg-card-title-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
 	margin-bottom: 4px;
 }
 
-.wwg-field-description {
-	margin: 0 0 8px;
-	color: #646970;
+.wwg-card-title-row h2 {
+	margin: 0;
+	padding: 0;
+	font-size: 16px;
+}
+
+/* A small icon trigger that reveals the use-case/quality table (built in
+ * admin-page.php from WWG_Admin::quality_guide_for()) on hover or
+ * keyboard focus, instead of it sitting permanently inline -- keeps the
+ * whole Settings card down to just a checkbox+slider per format normally,
+ * with the reference material a hover away rather than always taking up
+ * space once someone's already decided.
+ */
+.wwg-help {
+	position: relative;
+	display: inline-flex;
+}
+
+.wwg-help-trigger {
+	display: flex;
+	align-items: center;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+}
+
+/* Icon-only (a dashicon, not link text) -- sized and colored to sit
+ * quietly next to the heading rather than reading as its own line of
+ * text the way the earlier text-link version of this control did.
+ */
+/* A filled circle badge, not a plain muted glyph sitting inline with the
+ * heading text -- the earlier bare-icon version didn't read as clickable
+ * at a glance. Colored by default (not just on hover) so it's obvious
+ * without needing to already be looking for it.
+ */
+.wwg-help-trigger--icon {
+	color: #2271b1;
+	background: #f0f6fc;
+	border-radius: 50%;
+	width: 22px;
+	height: 22px;
+	justify-content: center;
+	transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.wwg-help-trigger--icon .dashicons {
+	width: 16px;
+	height: 16px;
+	font-size: 16px;
+}
+
+.wwg-help-trigger--icon:hover,
+.wwg-help-trigger--icon:focus {
+	background: #2271b1;
+	color: #fff;
+	outline: none;
+}
+
+.wwg-help-tooltip {
+	display: none;
+	position: absolute;
+	z-index: 10;
+	top: 100%;
+	left: 0;
+	margin-top: 6px;
+	padding: 12px;
+	width: max-content;
+	max-width: min(620px, 90vw);
+	background: #fff;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	box-shadow: 0 2px 8px rgba( 0, 0, 0, 0.13 );
+}
+
+/* :focus-within (not just :focus on the trigger) so the tooltip stays
+ * open while a mouse moves from the trigger into the tooltip itself (the
+ * table can be wide enough to need its own horizontal scroll), and so
+ * tabbing to the trigger opens it exactly the same way hovering does.
+ */
+.wwg-help:hover .wwg-help-tooltip,
+.wwg-help:focus-within .wwg-help-tooltip {
+	display: block;
+}
+
+.wwg-field {
+	margin-bottom: 16px;
+	/* Checkbox+label on the left, slider+number on the right, one line --
+	 * see .wwg-format-toggle/.wwg-quality-row below for the two halves.
+	 */
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	flex-wrap: wrap; /* narrow viewports wrap the slider below the label rather than overflowing, instead of shrinking either into uselessness. */
+	max-width: 680px;
+}
+
+.wwg-field label {
+	font-weight: 600;
+}
+
+/* The checkbox + "Generate <Format>" label pair -- fixed width (not just
+ * flex-shrink:0) so both formats' sliders line up at the same x position
+ * underneath each other, regardless of "AVIF" vs "WebP" being a
+ * different length.
+ */
+.wwg-format-toggle {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: none;
+	width: 160px;
+}
+
+.wwg-format-checkbox {
+	margin: 0;
+}
+
+/* Dimmed, not hidden or disabled, while its checkbox is unchecked (see
+ * wireQualityControls() in admin.js) -- the slider/number stay fully
+ * interactive and still submit/save normally either way, so setting a
+ * quality ahead of turning a format on (or just leaving it as it was)
+ * both work; the dimming is only a visual "not currently in effect".
+ * flex:1 so it's the half of the row that actually grows/shrinks -- the
+ * label to its left stays a fixed width (see .wwg-format-toggle above).
+ */
+.wwg-quality-row {
+	flex: 1;
+	min-width: 200px;
+	transition: opacity 0.15s ease;
+}
+
+.wwg-quality-row--disabled {
+	opacity: 0.45;
+}
+
+.wwg-quality-control {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+/* accent-color alone (the browser-default track/thumb, just recolored)
+ * isn't enough to actually read as a bigger control -- a native range's
+ * default track/thumb are small (~4px/~14px) regardless of that
+ * property, so the track and thumb are drawn explicitly here instead,
+ * roughly double those defaults, consistently across engines. Narrower
+ * than this card's earlier full-width-row layout (520px) now that it
+ * shares a line with the checkbox/label instead of getting one to
+ * itself.
+ */
+.wwg-quality-range {
+	flex: 1;
+	max-width: 300px;
+	height: 28px; /* hit-target box only -- the track/thumb below are what's actually visible, vertically centered in it. */
+	background: transparent;
+	appearance: none;
+	-webkit-appearance: none;
+	cursor: pointer;
+}
+
+.wwg-quality-range::-webkit-slider-runnable-track {
+	height: 8px;
+	border-radius: 4px;
+	background: #dcdcde;
+}
+
+.wwg-quality-range::-webkit-slider-thumb {
+	appearance: none;
+	-webkit-appearance: none;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	background: #2271b1;
+	margin-top: -8px; /* (8px track - 24px thumb) / 2, to center it over the track */
+	cursor: pointer;
+}
+
+.wwg-quality-range::-moz-range-track {
+	height: 8px;
+	border-radius: 4px;
+	background: #dcdcde;
+}
+
+.wwg-quality-range::-moz-range-thumb {
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	background: #2271b1;
+	border: none;
+	cursor: pointer;
+}
+
+.wwg-quality-number {
+	/* Fits 3 digits ("100") without the field visibly resizing as the
+	 * slider is dragged across it.
+	 */
+	width: 60px;
+	text-align: center;
+}
+
+/* Anchors .wwg-settings-save-indicator below, positioned relative to
+ * this, not the page -- absolute, so it never adds to this element's own
+ * height (unlike the text status this replaced, which grew the card the
+ * instant it had anything to say).
+ */
+.wwg-settings-fields {
+	position: relative;
+}
+
+/* The only sighted feedback that a checkbox/quality change was actually
+ * saved -- see wireSettingsAutosave() in admin.js -- there's no Save
+ * button anymore. A thin bar that slides in and fades back out, not a
+ * line of text: idle, it's zero width and fully transparent, so it can
+ * never affect layout in any state. Blue while the request is in flight,
+ * flashes green/red on the result, then fades out either way -- the
+ * accompanying #wwg-settings-save-status text (screen-reader-text in the
+ * markup) carries the same information for anyone who can't see a brief
+ * color change. Sits below the last setting row, not above the first one
+ * -- offset past .wwg-settings-fields's own bottom edge by half of
+ * .wwg-card's 24px padding, so it lands roughly centered in the gap
+ * between the settings and the card's border rather than butting up
+ * against either.
+ */
+.wwg-settings-save-indicator {
+	position: absolute;
+	bottom: -12px;
+	left: 0;
+	width: 0;
+	height: 2px;
+	background: #2271b1;
+	opacity: 0;
+	border-radius: 2px;
+}
+
+.wwg-settings-save-indicator.is-active {
+	width: 100%;
+	opacity: 1;
+	transition: width 0.4s ease, opacity 0.15s ease;
+}
+
+.wwg-settings-save-indicator.is-fading {
+	opacity: 0;
+	transition: opacity 0.5s ease;
+}
+
+.wwg-settings-save-indicator.is-success {
+	background: #007017;
+}
+
+.wwg-settings-save-indicator.is-error {
+	background: #b32d2e;
+}
+
+/* Per-use-case ranges (see WWG_Admin::quality_guide_for()), one shared
+ * table for every supported format rather than repeating the same rows
+ * per format -- explains *why* a number, not just what it does; a plain
+ * "higher = better, larger" description doesn't actually help anyone
+ * pick one. Its own scrolling container, not the page body -- a table
+ * is the one genuinely wide thing on this card.
+ */
+.wwg-quality-table-wrap {
+	overflow-x: auto;
+	margin: 0 0 10px;
+}
+
+.wwg-quality-table {
+	border-collapse: collapse;
+	width: 100%;
+	max-width: 620px;
 	font-size: 13px;
 }
 
-/* Sits under both quality sliders once more than one is shown -- explains
- * the two numbers aren't on a perceptually-equivalent scale, without
- * implying either slider needs a second look.
- */
-.wwg-quality-note {
-	font-size: 12px;
+.wwg-quality-table th,
+.wwg-quality-table td {
+	text-align: left;
+	padding: 7px 12px 7px 0;
+	border-bottom: 1px solid #f0f0f1;
+	white-space: nowrap;
+}
+
+.wwg-quality-table thead th {
 	color: #646970;
-	background: #f6f7f7;
-	border-radius: 4px;
-	padding: 8px 10px;
-	max-width: 420px;
-	margin: -6px 0 20px;
+	font-weight: 600;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.wwg-quality-table tbody th {
+	font-weight: 400;
+	color: #1d2327;
+	white-space: normal; /* the one column allowed to wrap -- use-case labels are the longest text in the table. */
+}
+
+.wwg-quality-table td {
+	font-variant-numeric: tabular-nums;
+	font-weight: 600;
+	color: #1d2327;
 }
 
 /* Generate WebP Images ---------------------------------------------- */
 
-/* Region 1 (Library Status) and Region 3 (Generate Results, once done)
- * both use this same muted-box treatment -- it's the one visual signal
- * for "settled/historical", the same #f6f7f7/#dcdcde tokens .wwg-code
- * and the failures/recoveries lists already use elsewhere on this page.
- * Region 3 stays on the plain white card background while actively
- * running/paused (see .wwg-results-box below), so "live and unsettled"
- * contrasts against "settled and historical" without needing a separate
- * icon to explain it. Only the box-appearance properties are shared here
- * -- margins differ by region/state, so each keeps its own rule below
- * rather than fighting this one over them.
- */
-.wwg-status-box,
-.wwg-results-box--done {
-	background: #f6f7f7;
-	border: 1px solid #dcdcde;
-	border-radius: 4px;
-	padding: 16px;
-}
-
-.wwg-status-box {
-	margin-bottom: 16px;
-}
-
-.wwg-status-header,
-.wwg-results-header {
+.wwg-results-header,
+.wwg-progress-status {
 	display: flex;
 	align-items: center;
 	gap: 7px;
@@ -244,10 +502,9 @@ details summary {
 	margin: 4px 0 0;
 }
 
-/* Region 3 while running/paused -- a plain continuation of the card,
- * deliberately NOT the muted box above (see the comment on
- * .wwg-status-box/.wwg-results-box--done) -- only picks up that
- * treatment once truly done.
+/* Live running/paused Generate progress only now (see its own markup
+ * comment in admin-page.php) -- a plain continuation of the card; there's
+ * no "done" variant of this to style differently anymore.
  */
 .wwg-results-box {
 	margin-top: 20px;
@@ -255,16 +512,15 @@ details summary {
 	border-top: 1px solid #dcdcde;
 }
 
-.wwg-results-box--done {
-	margin-top: 20px;
-	margin-bottom: 0;
-	border-top: none;
-}
-
 .wwg-actions {
 	display: flex;
 	gap: 8px;
-	margin-bottom: 4px;
+	/* Enough room to read as its own section break before the shared
+	 * progress status/bar below it -- matches the gap .wwg-results-box's
+	 * own margin-top uses, rather than the couple of pixels this used to
+	 * leave when nothing sat directly below the buttons.
+	 */
+	margin-bottom: 20px;
 }
 
 .wwg-progress {
@@ -302,40 +558,109 @@ details summary {
 	display: none;
 }
 
-.wwg-stats {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 24px;
+/* Library Status's Original/WebP/AVIF table -- a real bordered table
+ * (unlike .wwg-quality-table above, which is just reference material
+ * sitting quietly in Settings), since this one *is* the card's main
+ * content: a shaded header row and an outer border give it its own clear
+ * boundary rather than reading as loose text under the lede. Numeric
+ * columns (Images/Total size) are right-aligned -- the row-label column
+ * stays left -- so the tabular-nums figures line up on their ones place
+ * the way a reader actually scans a numbers table, not left-edge-aligned
+ * like prose.
+ */
+.wwg-library-table-wrap {
+	/* overflow-x (not "visible") also computes overflow-y to "auto" per
+	 * spec, which is what actually clips the header row's background to
+	 * this wrap's own rounded corners -- kept as overflow-x specifically,
+	 * not overflow: hidden, so the horizontal-scroll safety net .wwg-
+	 * quality-table-wrap elsewhere on this page also relies on survives
+	 * here too.
+	 */
+	overflow-x: auto;
+	/* Shrink-to-fit, not the card's full width -- three short columns of
+	 * numbers stretched across an 800px card just leaves a wide empty gap
+	 * between them; inline-block (rather than width: fit-content, which
+	 * some older WebViews inside wp-admin embeds don't support) sizes the
+	 * bordered wrap to its own table instead. max-width keeps the
+	 * overflow-x scroll still reachable if the table ever legitimately
+	 * needs more room than the card has. */
+	display: inline-block;
+	max-width: 100%;
 	margin: 4px 0 20px;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
 }
 
-.wwg-stats:last-child {
-	margin-bottom: 4px;
+.wwg-library-table {
+	border-collapse: collapse;
+	font-size: 13px;
+	/* Shrink-to-fit alone (see .wwg-library-table-wrap above) left this
+	 * reading as squished at its bare content width -- a floor of
+	 * roughly 3/5 of the card's own usable width (.wwg-wrap's 800px page
+	 * max-width, less .wwg-card's 24px padding each side) gives the three
+	 * columns real breathing room without forcing the table all the way
+	 * out to the card's full width. The wrap's own overflow-x still
+	 * covers a narrower viewport than this.
+	 */
+	min-width: 450px;
 }
 
-.wwg-stat {
-	display: flex;
-	flex-direction: column;
-	min-width: 150px;
+.wwg-library-table th,
+.wwg-library-table td {
+	text-align: right;
+	padding: 8px 12px;
+	border-bottom: 1px solid #dcdcde;
 }
 
-.wwg-stat--wide {
-	min-width: 160px;
+.wwg-library-table th:first-child,
+.wwg-library-table td:first-child {
+	text-align: left;
 }
 
-.wwg-stat-value {
-	font-size: 20px;
-	font-weight: 600;
-	line-height: 1.3;
-	font-variant-numeric: tabular-nums;
-}
-
-.wwg-stat-label {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	font-size: 12px;
+.wwg-library-table thead th {
+	background: #f6f7f7;
 	color: #646970;
+	font-weight: 600;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+/* The corner header cell has nothing of its own to label (there's no
+ * row-label column heading needed) -- put that space to use instead for
+ * when these numbers were captured. Green, not the muted gray the
+ * IMAGES/TOTAL SIZE headers next to it use -- the same settled/good
+ * semantic color .wwg-status-dot--done and .wwg-chip--avif already
+ * established elsewhere on this page, since a completed count is exactly
+ * that kind of fact. Overrides the header row's own uppercase/tracking/
+ * size, which would otherwise turn a real date into unreadable tiny caps.
+ */
+.wwg-as-of-badge {
+	display: inline-block;
+	background: #eaf3ea;
+	color: #00610f;
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: none;
+	letter-spacing: normal;
+	padding: 3px 8px;
+	border-radius: 3px;
+}
+
+.wwg-library-table tbody th {
+	font-weight: 400;
+	color: #1d2327;
+}
+
+.wwg-library-table td {
+	font-variant-numeric: tabular-nums;
+	font-weight: 600;
+	color: #1d2327;
+}
+
+.wwg-library-table tbody:last-of-type tr:last-child th,
+.wwg-library-table tbody:last-of-type tr:last-child td {
+	border-bottom: none;
 }
 
 .wwg-log {
@@ -420,6 +745,15 @@ details summary {
 .wwg-chip--avif {
 	background: #eaf3ea;
 	color: #00610f;
+}
+
+/* Reuses the same destructive/error red as .wwg-row-btn--danger/
+ * .wwg-failure-status--error, unlike the format tints above -- this one
+ * genuinely does mean "how healthy", on the Media Library column below.
+ */
+.wwg-chip--failed {
+	background: #fcf0f1;
+	color: #b32d2e;
 }
 
 .wwg-failure-text {
@@ -535,4 +869,28 @@ details summary {
 
 .wwg-recoveries-list li + li {
 	border-top: 1px solid #dcdcde;
+}
+
+.wwg-recovery-file {
+	display: block;
+	font-weight: 600;
+}
+
+/* A file recovered in more than one format shows one row per (file,
+ * format) pair -- see buildRecoveryRow() -- badged the same spacing as
+ * .wwg-failure-badges above so two rows for the same file read as
+ * "WebP, then AVIF", not as an unexplained duplicate.
+ */
+.wwg-recoveries-list .wwg-chip {
+	margin-top: 4px;
+}
+
+/* Same .wwg-row-link token .wwg-failure-actions rows already use, just
+ * stacked under the filename here instead of sitting in a flex row of
+ * buttons -- a recovery has nothing to fix or delete, only somewhere to
+ * go look.
+ */
+.wwg-recoveries-list .wwg-row-link {
+	display: block;
+	margin-top: 3px;
 }

@@ -10,12 +10,16 @@ use Brain\Monkey\Functions;
 
 /**
  * Exercises the persisted "Library Status" snapshot (see
- * WWG_Admin::OPTION_SCAN_STATE): handle_save_scan_result(), the AJAX
- * endpoint admin.js's finishScan() posts to once a client-driven Scan
- * pass completes, and mark_scan_state_stale(), called by WWG_Job the
- * moment a Generate run actually converts something.
+ * WWG_Admin::OPTION_SCAN_STATE): save_scan_state(), called directly by
+ * WWG_Job the moment a Generate run's own counting phase finishes walking
+ * the tree (see WWG_Job::process_one_batch()), and mark_scan_state_stale(),
+ * called by WWG_Job the moment a Generate run actually converts something.
+ * Unlike the old client-driven Scan flow this replaced, save_scan_state()
+ * takes a plain, already-trusted $stats array (process_batch()'s own
+ * output) rather than parsing/sanitizing untrusted $_POST -- so there's no
+ * nonce/capability/JSON-decoding layer to exercise here anymore.
  *
- * @covers \WWG_Admin::handle_save_scan_result
+ * @covers \WWG_Admin::save_scan_state
  * @covers \WWG_Admin::mark_scan_state_stale
  */
 class ScanStateTest extends TestCase {
@@ -30,47 +34,14 @@ class ScanStateTest extends TestCase {
 	 */
 	private $options;
 
-	/**
-	 * Captured argument of the most recent wp_send_json_success()/
-	 * wp_send_json_error() call -- standing in for the JSON response an
-	 * AJAX handler would have sent.
-	 *
-	 * @var mixed
-	 */
-	private $last_json;
-
 	protected function set_up() {
 		parent::set_up();
 
-		$this->options   = array();
-		$this->last_json = null;
-		$_POST            = array();
+		$this->options = array();
 
-		Functions\when( 'check_ajax_referer' )->justReturn( true );
-		Functions\when( 'current_user_can' )->justReturn( true );
 		Functions\when( 'absint' )->alias(
 			function ( $value ) {
 				return abs( (int) $value );
-			}
-		);
-		Functions\when( 'sanitize_text_field' )->alias(
-			function ( $value ) {
-				return trim( (string) $value );
-			}
-		);
-		Functions\when( 'wp_unslash' )->alias(
-			function ( $value ) {
-				return is_string( $value ) ? stripslashes( $value ) : $value;
-			}
-		);
-		Functions\when( 'wp_send_json_success' )->alias(
-			function ( $data = null ) {
-				$this->last_json = $data;
-			}
-		);
-		Functions\when( 'wp_send_json_error' )->alias(
-			function ( $data = null ) {
-				$this->last_json = $data;
 			}
 		);
 		Functions\when( 'get_option' )->alias(
@@ -86,11 +57,6 @@ class ScanStateTest extends TestCase {
 		);
 	}
 
-	protected function tear_down() {
-		$_POST = array();
-		parent::tear_down();
-	}
-
 	/**
 	 * @return \WWG_Admin
 	 */
@@ -98,128 +64,96 @@ class ScanStateTest extends TestCase {
 		return new \WWG_Admin( new \WWG_Generator() );
 	}
 
-	public function test_save_scan_result_persists_the_posted_tally() {
-		$_POST = array(
-			'missing'        => '3',
-			'original_bytes' => '12345',
-			'failures'       => encode_failures_for_post( array() ),
+	public function test_save_scan_state_persists_the_given_tally() {
+		$state = $this->admin()->save_scan_state(
+			array(
+				'missing'        => 3,
+				'missing_files'  => 2,
+				'original_bytes' => 12345,
+				'failures'       => array(),
+			)
 		);
 
-		$this->admin()->handle_save_scan_result();
+		$this->assertSame( 3, $state['missing'] );
+		$this->assertSame( 2, $state['missing_files'] );
+		$this->assertSame( 12345, $state['original_bytes'] );
+		$this->assertSame( array(), $state['failures'] );
+		$this->assertNull( $state['invalidated_at'] );
+		$this->assertGreaterThan( 0, $state['finished_at'] );
 
-		$this->assertSame( 3, $this->last_json['missing'] );
-		$this->assertSame( 12345, $this->last_json['original_bytes'] );
-		$this->assertSame( array(), $this->last_json['failures'] );
-		$this->assertNull( $this->last_json['invalidated_at'] );
-		$this->assertGreaterThan( 0, $this->last_json['finished_at'] );
-
-		// And actually persisted, not just returned in the response.
-		$this->assertSame( $this->last_json, $this->options[ self::OPTION_SCAN_STATE ] );
+		// And actually persisted, not just returned.
+		$this->assertSame( $state, $this->options[ self::OPTION_SCAN_STATE ] );
 	}
 
-	public function test_save_scan_result_stamps_the_server_clock_not_a_client_supplied_one() {
-		$_POST = array(
-			'missing'        => '1',
-			'original_bytes' => '0',
-			// A client can't set finished_at at all (the handler never
-			// reads such a field) -- confirmed here by asserting the
-			// stamped value is genuinely "now", not some arbitrary
-			// injected number.
-			'finished_at'    => '999999999999',
-			'failures'       => encode_failures_for_post( array() ),
-		);
-
+	public function test_save_scan_state_stamps_the_server_clock_not_a_caller_supplied_one() {
 		$before = time();
-		$this->admin()->handle_save_scan_result();
+		$state  = $this->admin()->save_scan_state(
+			array(
+				'missing'        => 1,
+				'original_bytes' => 0,
+				// Not a real field of the shape WWG_Job actually passes --
+				// confirms the handler stamps its own clock rather than
+				// trusting anything under this key even if present.
+				'finished_at'    => 999999999999,
+			)
+		);
 		$after = time();
 
-		$this->assertGreaterThanOrEqual( $before, $this->last_json['finished_at'] );
-		$this->assertLessThanOrEqual( $after, $this->last_json['finished_at'] );
+		$this->assertGreaterThanOrEqual( $before, $state['finished_at'] );
+		$this->assertLessThanOrEqual( $after, $state['finished_at'] );
 	}
 
-	public function test_save_scan_result_sanitizes_and_caps_failures() {
-		$failures = array();
-		for ( $i = 0; $i < 510; $i++ ) {
-			$failures[] = array(
-				'file'  => "2024/01/img{$i}.jpg",
-				'error' => 'Some decode error.',
-			);
-		}
-		// A malformed entry (missing 'error') should be dropped, not
-		// fatal -- a client-reported list is never trusted blindly.
-		$failures[] = array( 'file' => 'no-error-key.jpg' );
+	public function test_save_scan_state_defaults_missing_fields_to_empty() {
+		$state = $this->admin()->save_scan_state( array() );
 
-		$_POST = array(
-			'missing'        => '510',
-			'original_bytes' => '1000',
-			'failures'       => encode_failures_for_post( $failures ),
+		$this->assertSame( 0, $state['missing'] );
+		$this->assertSame( 0, $state['missing_files'] );
+		$this->assertSame( 0, $state['original_bytes'] );
+		$this->assertSame( 0, $state['total_images'] );
+		$this->assertSame( 0, $state['original_bytes_total'] );
+		$this->assertSame( 0, $state['webp_bytes'] );
+		$this->assertSame( 0, $state['avif_bytes'] );
+		$this->assertSame( 0, $state['webp_original_bytes'] );
+		$this->assertSame( 0, $state['avif_original_bytes'] );
+		$this->assertSame( 0, $state['webp_present'] );
+		$this->assertSame( 0, $state['avif_present'] );
+		$this->assertSame( array(), $state['failures'] );
+	}
+
+	/**
+	 * Library Status's own "complete current state" figures -- the whole
+	 * library, not just the missing subset the other fields already
+	 * cover. Persisted from $stats['scanned'] (as total_images) and the
+	 * per-format byte/present fields, which WWG_Job's counting phase
+	 * already computes for every file it visits (see process_batch()'s
+	 * own $stats docblock) -- what Library Status's Original/WebP/AVIF
+	 * table is built from.
+	 */
+	public function test_save_scan_state_persists_the_whole_library_totals() {
+		$state = $this->admin()->save_scan_state(
+			array(
+				'scanned'              => 47382,
+				'original_bytes_total' => 300,
+				'webp_bytes'           => 100,
+				'avif_bytes'           => 80,
+				'webp_original_bytes'  => 200,
+				'avif_original_bytes'  => 200,
+				'webp_present'         => 47000,
+				'avif_present'         => 46000,
+			)
 		);
 
-		$this->admin()->handle_save_scan_result();
-
-		// The cap keeps the most recent 500 *raw* entries submitted
-		// (array_slice(..., -500) runs before the malformed one is
-		// filtered out), so this ends up with 499 valid ones, not a flat
-		// 500 -- what matters is that it's bounded at all, and that the
-		// most recent well-formed entry submitted is still among them.
-		$this->assertCount( 499, $this->last_json['failures'] );
-		$this->assertSame( '2024/01/img509.jpg', $this->last_json['failures'][498]['file'] );
+		$this->assertSame( 47382, $state['total_images'] );
+		$this->assertSame( 300, $state['original_bytes_total'] );
+		$this->assertSame( 100, $state['webp_bytes'] );
+		$this->assertSame( 80, $state['avif_bytes'] );
+		$this->assertSame( 200, $state['webp_original_bytes'] );
+		$this->assertSame( 200, $state['avif_original_bytes'] );
+		$this->assertSame( 47000, $state['webp_present'] );
+		$this->assertSame( 46000, $state['avif_present'] );
 	}
 
-	public function test_save_scan_result_defaults_missing_fields_to_empty() {
-		$_POST = array(); // no missing/original_bytes/failures at all.
-
-		$this->admin()->handle_save_scan_result();
-
-		$this->assertSame( 0, $this->last_json['missing'] );
-		$this->assertSame( 0, $this->last_json['missing_files'] );
-		$this->assertSame( 0, $this->last_json['original_bytes'] );
-		$this->assertSame( array(), $this->last_json['failures'] );
-	}
-
-	public function test_save_scan_result_persists_missing_files_and_per_failure_format() {
-		Functions\when( 'sanitize_key' )->alias(
-			function ( $value ) {
-				return strtolower( preg_replace( '/[^a-z0-9_\-]/i', '', (string) $value ) );
-			}
-		);
-
-		$_POST = array(
-			'missing'        => '2',
-			'missing_files'  => '1', // one file, missing both formats.
-			'original_bytes' => '100',
-			'failures'       => encode_failures_for_post(
-				array(
-					array( 'file' => '2024/01/both.jpg', 'format' => 'avif', 'error' => 'broken avif' ),
-					array( 'file' => '2024/01/both.jpg', 'format' => 'webp', 'error' => 'broken webp' ),
-				)
-			),
-		);
-
-		$this->admin()->handle_save_scan_result();
-
-		$this->assertSame( 1, $this->last_json['missing_files'] );
-		$this->assertSame( 'avif', $this->last_json['failures'][0]['format'] );
-		$this->assertSame( 'webp', $this->last_json['failures'][1]['format'] );
-	}
-
-	public function test_save_scan_result_defaults_a_missing_format_field_to_webp() {
-		// Mirrors what a pre-AVIF admin.js build would have posted --
-		// still handled correctly, not dropped or fatal.
-		$_POST = array(
-			'missing'        => '1',
-			'original_bytes' => '10',
-			'failures'       => encode_failures_for_post(
-				array( array( 'file' => '2024/01/old.jpg', 'error' => 'broken' ) )
-			),
-		);
-
-		$this->admin()->handle_save_scan_result();
-
-		$this->assertSame( 'webp', $this->last_json['failures'][0]['format'] );
-	}
-
-	public function test_a_fresh_scan_result_clears_a_prior_invalidation() {
+	public function test_a_fresh_scan_state_clears_a_prior_invalidation() {
 		$this->options[ self::OPTION_SCAN_STATE ] = array(
 			'missing'        => 5,
 			'original_bytes' => 500,
@@ -228,15 +162,14 @@ class ScanStateTest extends TestCase {
 			'invalidated_at' => 2000, // previously marked stale.
 		);
 
-		$_POST = array(
-			'missing'        => '0',
-			'original_bytes' => '0',
-			'failures'       => encode_failures_for_post( array() ),
+		$state = $this->admin()->save_scan_state(
+			array(
+				'missing'        => 0,
+				'original_bytes' => 0,
+			)
 		);
 
-		$this->admin()->handle_save_scan_result();
-
-		$this->assertNull( $this->last_json['invalidated_at'] );
+		$this->assertNull( $state['invalidated_at'] );
 	}
 
 	public function test_mark_scan_state_stale_sets_invalidated_at_but_keeps_the_old_numbers() {
@@ -266,17 +199,4 @@ class ScanStateTest extends TestCase {
 
 		$this->assertArrayNotHasKey( self::OPTION_SCAN_STATE, $this->options );
 	}
-}
-
-/**
- * Builds the raw $_POST['failures'] string a real admin.js
- * JSON.stringify() call would send -- the handler under test only ever
- * calls json_decode() (a PHP builtin, not a WP wrapper) on it, so a plain
- * json_encode() here is exactly what's on the wire, no stub needed.
- *
- * @param mixed $data
- * @return string
- */
-function encode_failures_for_post( $data ) {
-	return json_encode( $data ); // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode -- test-only helper, not plugin code; mirrors a client payload, not a WordPress data write.
 }

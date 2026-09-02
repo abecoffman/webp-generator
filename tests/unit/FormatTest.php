@@ -30,6 +30,21 @@ class FormatTest extends TestCase {
 				return $value;
 			}
 		);
+		// enabled() also calls user_wants() -> get_option( ..., $default );
+		// default to an ESTABLISHED site (a real, finished scan on record)
+		// so tests not specifically about the Settings checkbox, or about
+		// user_wants()'s fresh-install-only smart default, get the plain
+		// "true unless explicitly unchecked" behavior every test here
+		// originally assumed -- see fresh_install()'s own docblock in
+		// class-wwg-format.php for why that default only ever applies to
+		// a genuinely fresh install. Tests specifically about that
+		// default override this locally to simulate a fresh one instead
+		// (no wwg_scan_state on record at all).
+		Functions\when( 'get_option' )->alias(
+			function ( $option, $default = false ) {
+				return 'wwg_scan_state' === $option ? array( 'finished_at' => 1000 ) : $default;
+			}
+		);
 	}
 
 	public function test_all_returns_both_formats_in_priority_order() {
@@ -42,7 +57,7 @@ class FormatTest extends TestCase {
 		$this->assertSame( 'avif', $avif['extension'] );
 		$this->assertSame( 'image/avif', $avif['mime'] );
 		$this->assertSame( 'wwg_quality_avif', $avif['quality_option'] );
-		$this->assertSame( 75, $avif['default_quality'] );
+		$this->assertSame( 85, $avif['default_quality'] );
 	}
 
 	public function test_webps_definition_keeps_the_original_quality_option_unchanged() {
@@ -51,7 +66,7 @@ class FormatTest extends TestCase {
 		// migration -- pinned here, not just trusted.
 		$webp = \WWG_Format::get( 'webp' );
 		$this->assertSame( 'wwg_quality', $webp['quality_option'] );
-		$this->assertSame( 75, $webp['default_quality'] );
+		$this->assertSame( 80, $webp['default_quality'] );
 	}
 
 	public function test_get_returns_null_for_an_unrecognized_format() {
@@ -110,6 +125,91 @@ class FormatTest extends TestCase {
 		);
 
 		$this->assertSame( array( 'avif', 'webp' ), \WWG_Format::enabled() );
+	}
+
+	public function test_user_wants_defaults_true_on_an_established_site_when_the_option_has_never_been_set() {
+		// The actual upgrade-safety guarantee: a site that predates this
+		// option (i.e. anything with a real scan on record already, per
+		// set_up()'s default mock) must keep generating exactly what it
+		// already was.
+		$this->assertTrue( \WWG_Format::user_wants( 'webp' ) );
+		$this->assertTrue( \WWG_Format::user_wants( 'avif' ) );
+	}
+
+	public function test_user_wants_reflects_each_formats_own_option_independently() {
+		Functions\when( 'get_option' )->alias(
+			function ( $option, $default = false ) {
+				if ( 'wwg_scan_state' === $option ) {
+					return array( 'finished_at' => 1000 ); // Established site -- see this test file's own set_up().
+				}
+				return 'wwg_enabled_avif' === $option ? false : $default;
+			}
+		);
+
+		$this->assertTrue( \WWG_Format::user_wants( 'webp' ) );
+		$this->assertFalse( \WWG_Format::user_wants( 'avif' ) );
+	}
+
+	public function test_user_wants_returns_false_for_an_unrecognized_format() {
+		$this->assertFalse( \WWG_Format::user_wants( 'heic' ) );
+	}
+
+	public function test_user_wants_webp_defaults_off_on_a_fresh_install_when_avif_is_supported() {
+		// The new smart default this session added: a fresh install (no
+		// wwg_scan_state on record at all -- unlike this file's own
+		// set_up() default) with AVIF support gets AVIF only, not both,
+		// to avoid doubling storage/CPU for a format most browsers won't
+		// use once AVIF exists. This machine's real GD genuinely supports
+		// AVIF (see test_has_support_reflects_this_machines_real_gd()),
+		// so this is exercising the real capability check, not a mock of
+		// it -- there's no honest way to also test the "AVIF unsupported"
+		// branch here for the same reason AdminSettingsTest.php's own
+		// equivalent test doesn't exist (has_support() asks real
+		// Imagick/GD, not something this tier can fake).
+		Functions\when( 'get_option' )->alias(
+			function ( $option, $default = false ) {
+				return 'wwg_scan_state' === $option ? array() : $default;
+			}
+		);
+
+		$this->assertFalse( \WWG_Format::user_wants( 'webp' ) );
+		$this->assertTrue( \WWG_Format::user_wants( 'avif' ) );
+	}
+
+	public function test_enabled_excludes_a_format_the_site_owner_unchecked() {
+		Functions\when( 'get_option' )->alias(
+			function ( $option, $default = false ) {
+				if ( 'wwg_scan_state' === $option ) {
+					return array( 'finished_at' => 1000 ); // Established site -- see this test file's own set_up().
+				}
+				return 'wwg_enabled_avif' === $option ? false : $default;
+			}
+		);
+
+		$this->assertSame( array( 'webp' ), \WWG_Format::enabled() );
+	}
+
+	public function test_enabled_returns_only_avif_by_default_on_a_fresh_install() {
+		Functions\when( 'get_option' )->alias(
+			function ( $option, $default = false ) {
+				return 'wwg_scan_state' === $option ? array() : $default;
+			}
+		);
+
+		$this->assertSame( array( 'avif' ), \WWG_Format::enabled() );
+	}
+
+	public function test_enabled_can_be_narrowed_to_nothing_at_all() {
+		Functions\when( 'get_option' )->alias(
+			function ( $option, $default = false ) {
+				if ( 'wwg_scan_state' === $option ) {
+					return array( 'finished_at' => 1000 ); // Established site -- see this test file's own set_up().
+				}
+				return false;
+			}
+		);
+
+		$this->assertSame( array(), \WWG_Format::enabled() );
 	}
 
 	public function test_enabled_cannot_be_tricked_into_including_a_format_outside_priority() {
