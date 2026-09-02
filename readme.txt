@@ -2,22 +2,22 @@
 Contributors: abecoffman
 Tags: webp, image optimization, performance, media, images
 Requires at least: 6.0
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.15.0
+Stable tag: 1.16.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Generates WebP (and AVIF, if your server supports it) versions of your images automatically, catches up your existing media library on demand, and helps your server actually serve them.
+Generates WebP and AVIF versions of your images automatically, catches up your existing library on demand, and helps your server serve them.
 
 == Description ==
 
-WebP Generator creates a `.webp` version of every image you upload — automatically, for the original file and every size WordPress generates — using Imagick or GD (no shell access or external binary required). If your server's Imagick or GD build also supports AVIF (roughly half the file size of WebP at comparable quality), an `.avif` version is generated right alongside it automatically too — no setting to find or toggle on, it just happens the moment your server can do it. New uploads are covered from the moment you activate the plugin.
+WebP Generator creates a `.webp` version of every image you upload, automatically, for the original file and every size WordPress generates, using Imagick or GD (no shell access or external binary required). If your server's Imagick or GD build also supports AVIF (roughly half the file size of WebP at comparable quality), an `.avif` version is generated right alongside it automatically too, the moment your server can do it -- on by default, with nothing to configure, but either format can be turned off from Settings if you'd rather not generate it. New uploads are covered from the moment you activate the plugin.
 
-For everything uploaded *before* that, **Tools → WebP Generator** adds a simple Scan / Generate / Cancel tool:
+For everything uploaded *before* that, **Tools → WebP Generator** adds a simple Generate / Cancel tool:
 
-* **Scan** reports how many images in your media library are missing a converted version, and how much that adds up to, before anything is written. The result sticks around ("Library status") — reload the page, come back tomorrow, it's still there, dated, and re-checking is one click any time.
-* **Generate** converts them in the background — it keeps running even if you close the browser tab, so a large library doesn't need to be babysat. Come back any time and the page picks up exactly where things stand: still running, paused, or finished, no need to click Generate again to see it. If you're elsewhere in wp-admin when it finishes, a notice and a Tools-menu badge let you know. It's resumable: batches are small and bounded so it can't time out on a large library, and if you click **Cancel**, it pauses exactly where it was — click Generate again any time to pick up from that point.
+* **Generate** first checks how many images in your media library are missing a converted version, and how much that adds up to, before writing anything — the result sticks around ("Library status") even after conversion starts, so you can always see where things stand. Reload the page, come back tomorrow, it's still there, dated, and re-checking is automatic the next time you click Generate.
+* Once that's done, it converts them in the background — it keeps running even if you close the browser tab, so a large library doesn't need to be babysat. Come back any time and the page picks up exactly where things stand: still checking, still running, paused, or finished, no need to click Generate again to see it. If you're elsewhere in wp-admin when it finishes, a notice and a Tools-menu badge let you know. It's resumable: batches are small and bounded so it can't time out on a large library, and if you click **Cancel**, it pauses exactly where it was — click Generate again any time to pick up from that point.
 
 = Serving the files =
 
@@ -29,7 +29,8 @@ If your site runs Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, or L
 
 = Also included =
 
-* Configurable quality per format (1-100, default 75 each) — WebP and AVIF are independent sliders, since they're not on a perceptually equivalent scale at the same number.
+* Each format can be turned on or off, and its quality set independently (1-100, default 80 for WebP, 85 for AVIF), from Settings -- WebP and AVIF aren't on a perceptually equivalent scale at the same number, so each gets its own slider, with per-use-case guidance (backgrounds, thumbnails, photography) shown right on the page.
+* The Media Library's list view shows each image's own WebP/AVIF status, with a one-click **Generate** right there for anything still missing one -- no trip to Tools needed for just one image.
 * Works with any uploads folder layout, not just WordPress's default year/month structure.
 * A handful of filters for developers: `wwg_scan_directories`, `wwg_clear_cache_for_attachment`, `wwg_clear_all_cache`, `wwg_attempt_recovery`, `wwg_allow_failure_actions`, `wwg_enabled_formats`.
 
@@ -38,7 +39,7 @@ If your site runs Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, or L
 1. Install and activate the plugin (Plugins → Add New → search "WebP Generator", or upload the zip manually).
 2. Visit **Tools → WebP Generator**.
 3. If prompted, set up server-side serving under "Rewrite Rules" (one click on Apache/LiteSpeed).
-4. Click **Scan**, then **Generate** to catch up your existing media library.
+4. Click **Generate** to catch up your existing media library.
 
 That's it — new uploads are handled automatically from here on.
 
@@ -50,7 +51,7 @@ The plugin still generates the files (WebP, and AVIF if your server supports it)
 
 = Does this replace or delete my original images? =
 
-Not automatically, and never a healthy one. `.webp`/`.avif` files are written alongside the originals; nothing existing is ever deleted, replaced, or modified as a side effect of Scan or Generate.
+Not automatically, and never a healthy one. `.webp`/`.avif` files are written alongside the originals; nothing existing is ever deleted, replaced, or modified as a side effect of Generate.
 
 The one deliberate exception: a file that's already proven corrupt and unrecoverable (it failed normal conversion *and* the embedded-data recovery attempt) gets a "Fix this file" / "Delete this file" action in the "Failed conversions" list, so you're not left with no way to clear it out. Fixing a broken thumbnail-size file regenerates it from its healthy original — the original itself is never touched. Deleting is available too, always behind a confirmation, and if the corrupt file turns out to be the original image itself, deleting it removes the whole attachment (confirmed with a stronger, more explicit warning first) rather than leaving a broken remainder behind. Every action is a deliberate, per-file click — never automatic, and never offered for a file that isn't already confirmed broken. Can be turned off entirely with the `wwg_allow_failure_actions` filter.
 
@@ -60,7 +61,7 @@ Nothing — uninstalling only removes the plugin's own settings. Your generated 
 
 = What if my server doesn't support WebP or AVIF encoding? =
 
-The plugin checks whether Imagick or GD on your server was actually compiled with WebP support, and separately whether either supports AVIF, and tells you plainly on the settings page if neither format works at all — most hosts support at least WebP. Scan/Generate are disabled entirely only if nothing works. If just one format isn't available (AVIF support is newer and less universal than WebP's), the plugin quietly keeps using whichever one does — no error, no setting to change, nothing broken; you're just not getting the smaller AVIF files yet, and the moment your host adds support, this plugin picks it up automatically on its own.
+The plugin checks whether Imagick or GD on your server was actually compiled with WebP support, and separately whether either supports AVIF, and tells you plainly on the settings page if neither format works at all — most hosts support at least WebP. Generate is disabled entirely only if nothing works. If just one format isn't available (AVIF support is newer and less universal than WebP's), the plugin quietly keeps using whichever one does — no error, no setting to change, nothing broken; you're just not getting the smaller AVIF files yet, and the moment your host adds support, this plugin picks it up automatically on its own.
 
 = What happens if I close the tab while Generate is running? =
 
@@ -72,11 +73,17 @@ Cache Enabler, WP Rocket, W3 Total Cache, WP Super Cache, and LiteSpeed Cache. S
 
 == Screenshots ==
 
-1. Tools → WebP Generator: scan a media library and generate missing WebP images with live progress.
+1. Tools → WebP Generator: check a media library and generate missing WebP images with live progress.
 2. Rewrite Rules: one-click server setup, with a syntax-highlighted example for manual configuration.
 3. Settings: configurable quality per format.
 
 == Changelog ==
+
+= 1.16.0 =
+* Scan is gone as a separate step -- Generate's own first phase now counts the library itself, so there's one button, and it's never working from a possibly-stale prior count. Library Status is a real reference table now (image count and total size per format), living in its own card with a small "As of" badge showing when it was last confirmed accurate, and folds in Failed Conversions and Recovered-from-embedded-data too instead of duplicating them elsewhere.
+* The Media Library's list view now shows each image's own WebP/AVIF status, with a one-click **Generate** for anything still missing one.
+* Fixes a rare case where Library Status could get stuck showing stale numbers if a background WP-Cron tick finished counting the library before the browser's own polling caught up to it.
+* Generate now shows "Starting…" immediately on click instead of a blank progress line while it works out how big the job actually is.
 
 = 1.15.0 =
 * Adds AVIF alongside WebP -- generated automatically for every new upload the moment your server's Imagick or GD actually supports it, no setting to find or turn on. Fully integrated everywhere WebP already was: one Library status, one Scan/Generate pipeline, one Failed Conversions list (with a small format badge on any entry once more than one format is active), a per-format quality slider, and the `.htaccess` rewrite rule now serves AVIF first when both exist for a file, falling back to WebP, then the original. If your server gains AVIF support after the rule was already installed, the Rewrite Rules card notices and offers to update it. "Fix this file" now regenerates every currently-missing format for that file in one click, and "Delete this file" clears all of them together. A site that would rather control this itself can narrow (never widen) which formats are actually produced via the new `wwg_enabled_formats` filter.

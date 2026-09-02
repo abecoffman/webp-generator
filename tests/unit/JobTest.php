@@ -86,21 +86,85 @@ class WWG_Admin_Reentrant_Fake extends \WWG_Admin {
 
 		return array(
 			'stats'       => array(
-				'scanned'        => 1,
-				'missing'        => 1,
-				'converted'      => 1,
-				'failed'         => 0,
-				'original_bytes' => 0,
-				'webp_bytes'     => 0,
-				'avif_bytes'     => 0,
-				'failures'       => array(),
-				'recoveries'     => array(),
+				'scanned'              => 1,
+				'missing'              => 1,
+				'missing_files'        => 1,
+				'converted'            => 1,
+				'failed'               => 0,
+				'original_bytes'       => 0,
+				'original_bytes_total' => 0,
+				'webp_bytes'           => 0,
+				'avif_bytes'           => 0,
+				'webp_original_bytes'  => 0,
+				'avif_original_bytes'  => 0,
+				'webp_present'         => 0,
+				'avif_present'         => 0,
+				'failures'             => array(),
+				'recoveries'           => array(),
 			),
 			'dir'         => '2024/01',
 			'dir_index'   => 1,
 			'file_offset' => 0,
+			'total_dirs'  => 5,
 			'done'        => false,
 		);
+	}
+}
+
+/**
+ * A WWG_Admin double whose run_job_batch() call invokes a given callback
+ * BEFORE returning its own canned batch result -- used to simulate a
+ * Cancel click's *effect* (status flipped to 'paused', schedule cleared)
+ * landing on the server *while* a batch's own slow work (a real directory
+ * walk or actual image conversion) is still in flight, exactly the race
+ * fresh_status() exists to close.
+ *
+ * Deliberately does NOT call the real handle_cancel_job() reentrantly the
+ * way WWG_Admin_Reentrant_Fake above calls handle_drive_job()/run_tick()
+ * -- handle_cancel_job() now waits on LOCK_KEY itself (see its own
+ * docblock), which the *outer* process_one_batch() call is already
+ * holding for the entire duration of this reentrant call; a truly nested
+ * call can never wait out its own enclosing call the way two genuinely
+ * concurrent requests actually would. Simulating the cancel's end state
+ * directly sidesteps that mismatch between this test's single-threaded
+ * reentrancy trick and real concurrency, without weakening what's
+ * actually being proven (that a status change landing mid-batch isn't
+ * silently overwritten).
+ */
+class WWG_Admin_Cancels_Mid_Batch extends \WWG_Admin {
+
+	/**
+	 * @var int
+	 */
+	public $calls = 0;
+
+	/**
+	 * @var callable
+	 */
+	private $simulate_cancel;
+
+	/**
+	 * @var array
+	 */
+	private $canned;
+
+	/**
+	 * @param array    $canned          The single batch result to return,
+	 *                                  after the simulated cancel.
+	 * @param callable $simulate_cancel Mutates the fake transient store to
+	 *                                  the same end state a real
+	 *                                  handle_cancel_job() call would.
+	 */
+	public function __construct( array $canned, callable $simulate_cancel ) {
+		parent::__construct( new \WWG_Generator() );
+		$this->canned          = $canned;
+		$this->simulate_cancel = $simulate_cancel;
+	}
+
+	public function run_job_batch( $dir_index, $file_offset, $mode ) {
+		++$this->calls;
+		( $this->simulate_cancel )();
+		return $this->canned;
 	}
 }
 
@@ -232,20 +296,33 @@ class JobTest extends TestCase {
 		return array_merge(
 			array(
 				'status'        => 'running',
+				// These tests are all about jobs already past counting
+				// (the pre-existing suite, from before the counting phase
+				// existed at all) -- explicit here rather than leaning on
+				// get_state()'s migration backfill for a missing 'phase'
+				// key, which is exercised directly by its own tests below.
+				'phase'         => 'converting',
+				'total_dirs'    => 5,
 				'cursor'        => array(
 					'dir_index'   => 0,
 					'file_offset' => 0,
 				),
 				'stats'         => array(
-					'scanned'        => 0,
-					'missing'        => 0,
-					'converted'      => 0,
-					'failed'         => 0,
-					'original_bytes' => 0,
-					'webp_bytes'     => 0,
-					'avif_bytes'     => 0,
-					'failures'       => array(),
-					'recoveries'     => array(),
+					'scanned'              => 0,
+					'missing'              => 0,
+					'missing_files'        => 0,
+					'converted'            => 0,
+					'failed'               => 0,
+					'original_bytes'       => 0,
+					'original_bytes_total' => 0,
+					'webp_bytes'           => 0,
+					'avif_bytes'           => 0,
+					'webp_original_bytes'  => 0,
+					'avif_original_bytes'  => 0,
+					'webp_present'         => 0,
+					'avif_present'         => 0,
+					'failures'             => array(),
+					'recoveries'           => array(),
 				),
 				'total_missing' => 5,
 				'current_dir'   => '',
@@ -265,25 +342,32 @@ class JobTest extends TestCase {
 	 * @param int   $file_offset
 	 * @return array Shape returned by WWG_Admin::run_job_batch().
 	 */
-	private function canned_batch( array $stats_overrides, $done, $dir_index = 1, $file_offset = 0 ) {
+	private function canned_batch( array $stats_overrides, $done, $dir_index = 1, $file_offset = 0, $total_dirs = 5 ) {
 		return array(
 			'stats'       => array_merge(
 				array(
-					'scanned'        => 0,
-					'missing'        => 0,
-					'converted'      => 0,
-					'failed'         => 0,
-					'original_bytes' => 0,
-					'webp_bytes'     => 0,
-					'avif_bytes'     => 0,
-					'failures'       => array(),
-					'recoveries'     => array(),
+					'scanned'              => 0,
+					'missing'              => 0,
+					'missing_files'        => 0,
+					'converted'            => 0,
+					'failed'               => 0,
+					'original_bytes'       => 0,
+					'original_bytes_total' => 0,
+					'webp_bytes'           => 0,
+					'avif_bytes'           => 0,
+					'webp_original_bytes'  => 0,
+					'avif_original_bytes'  => 0,
+					'webp_present'         => 0,
+					'avif_present'         => 0,
+					'failures'             => array(),
+					'recoveries'           => array(),
 				),
 				$stats_overrides
 			),
 			'dir'         => '2024/01',
 			'dir_index'   => $dir_index,
 			'file_offset' => $file_offset,
+			'total_dirs'  => $total_dirs,
 			'done'        => $done,
 		);
 	}
@@ -337,6 +421,217 @@ class JobTest extends TestCase {
 
 		$this->assertSame( 0, $admin->calls );
 		$this->assertArrayNotHasKey( 'wwg_job_lock', $this->transients );
+	}
+
+	// ---- the counting phase -- Generate's own scan-equivalent first
+	// phase, replacing the old standalone Scan button/flow ----
+
+	public function test_counting_phase_advances_then_flips_to_converting_once_the_tree_is_walked() {
+		$this->transients['wwg_job_state'] = $this->running_state(
+			array(
+				'phase'         => 'counting',
+				'total_dirs'    => 0,
+				'total_missing' => 0,
+			)
+		);
+
+		$admin          = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$admin->batches = array(
+			$this->canned_batch( array( 'missing' => 3, 'missing_files' => 2, 'original_bytes' => 500 ), false, 1, 0 ),
+			$this->canned_batch( array( 'missing' => 4, 'missing_files' => 3, 'original_bytes' => 700 ), true, 2, 0 ),
+		);
+		$job = new \WWG_Job( $admin );
+
+		$job->run_tick();
+		$state = $this->transients['wwg_job_state'];
+		$this->assertSame( 'counting', $state['phase'] );
+		$this->assertSame( 5, $state['total_dirs'] ); // canned_batch()'s default.
+		$this->assertSame( 1, $state['cursor']['dir_index'] );
+
+		// handle_drive_job() here rather than run_tick() -- this is the
+		// one tick where the response itself needs checking too (see
+		// below), not just the persisted transient.
+		$job->handle_drive_job();
+		$state = $this->transients['wwg_job_state'];
+
+		// Flipped to the real conversion phase, with total_missing now
+		// measured firsthand from the walk that just finished (3 + 4)
+		// instead of client-supplied.
+		$this->assertSame( 'running', $state['status'] );
+		$this->assertSame( 'converting', $state['phase'] );
+		$this->assertSame( 7, $state['total_missing'] );
+
+		// Cursor and stats reset to a clean slate for the conversion work
+		// about to start -- they described the counting walk, not it.
+		$this->assertSame( 0, $state['cursor']['dir_index'] );
+		$this->assertSame( 0, $state['cursor']['file_offset'] );
+		$this->assertSame( 0, $state['stats']['missing'] );
+		$this->assertSame( 0, $state['stats']['converted'] );
+
+		// Region 1's "Library Status" is populated the moment counting
+		// finishes, same as the old standalone Scan used to do.
+		$scan_state = $this->options['wwg_scan_state'];
+		$this->assertSame( 7, $scan_state['missing'] );
+		$this->assertSame( 5, $scan_state['missing_files'] );
+		$this->assertSame( 1200, $scan_state['original_bytes'] );
+
+		// And handed back in this exact tick's own response too -- the
+		// only place admin.js can learn this happened at all, since it
+		// has no finishScan()-equivalent request of its own anymore.
+		$this->assertSame( 'advanced', $this->last_json['outcome'] );
+		$this->assertSame( 7, $this->last_json['scan_state']['missing'] );
+
+		// Still 'advanced', not 'done' -- driving must continue straight
+		// into the conversion phase without the client needing to do
+		// anything.
+		$this->assertSame( 2, $this->schedule_single_calls );
+	}
+
+	public function test_counting_phase_finishes_the_job_immediately_when_nothing_is_missing() {
+		$this->transients['wwg_job_state'] = $this->running_state(
+			array(
+				'phase'         => 'counting',
+				'total_dirs'    => 0,
+				'total_missing' => 0,
+			)
+		);
+
+		$admin          = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$admin->batches = array(
+			$this->canned_batch( array( 'missing' => 0 ), true, 1, 0 ),
+		);
+		$job = new \WWG_Job( $admin );
+
+		$job->handle_drive_job();
+		$state = $this->transients['wwg_job_state'];
+
+		// Nothing to convert -- the job finishes right here rather than
+		// starting a converting phase with no work in it.
+		$this->assertSame( 'done', $state['status'] );
+		$this->assertNotNull( $state['finished_at'] );
+		$this->assertSame( 0, $this->options['wwg_scan_state']['missing'] );
+
+		// No conversion happened, so nothing to clear the cache over or
+		// invalidate the snapshot that was just written.
+		$this->assertFalse( $state['cache_cleared'] );
+		$this->assertNull( $this->options['wwg_scan_state']['invalidated_at'] );
+
+		// scan_state present here too -- same reasoning as the
+		// counting-to-converting flip above.
+		$this->assertSame( 'done', $this->last_json['outcome'] );
+		$this->assertSame( 0, $this->last_json['scan_state']['missing'] );
+	}
+
+	public function test_get_state_treats_a_transient_with_no_phase_key_as_already_converting() {
+		// Exactly the shape a transient persisted before the counting
+		// phase existed would have -- no 'phase' or 'total_dirs' keys at
+		// all, but genuinely mid-conversion (the old standalone Scan was
+		// already a separate, finished step by the time a job like this
+		// could exist).
+		$this->transients['wwg_job_state'] = array(
+			'status'        => 'running',
+			'cursor'        => array(
+				'dir_index'   => 2,
+				'file_offset' => 10,
+			),
+			'stats'         => array(
+				'scanned'   => 5,
+				'converted' => 3,
+				'failed'    => 0,
+			),
+			'total_missing' => 5,
+			'current_dir'   => '2024/01',
+			'cache_cleared' => false,
+			'started_at'    => 1000,
+			'finished_at'   => null,
+			'seen'          => false,
+		);
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		$state = $job->get_state();
+
+		// Backfilled as 'converting', not default_state()'s 'counting' --
+		// a blind merge would otherwise wrongly restart this job counting
+		// from scratch instead of resuming its real conversion work.
+		$this->assertSame( 'converting', $state['phase'] );
+		$this->assertSame( 2, $state['cursor']['dir_index'] ); // untouched.
+	}
+
+	// ---- the Cancel race (see wwg-job-cancel-race-condition in project
+	// memory): handle_cancel_job() doesn't hold LOCK_KEY, so it can write
+	// 'paused' while a batch already past its own 'running' check is
+	// still mid-flight (real image conversion, or a real directory walk,
+	// both genuinely slow) -- fresh_status() re-checks right before
+	// deciding to keep a batch's own result as 'running' and reschedule
+	// another tick, so a concurrent cancel can't get silently overwritten
+	// and the job resurrected with no one watching. ----
+
+	public function test_a_cancel_landing_mid_batch_is_not_silently_overwritten_by_that_batchs_own_write() {
+		$this->transients['wwg_job_state'] = $this->running_state();
+
+		$admin = new WWG_Admin_Cancels_Mid_Batch(
+			$this->canned_batch( array( 'converted' => 2 ), false, 1, 0 ),
+			function () {
+				$state             = $this->transients['wwg_job_state'];
+				$state['status']   = 'paused';
+				$this->transients['wwg_job_state'] = $state;
+			}
+		);
+		$job = new \WWG_Job( $admin );
+
+		$job->run_tick();
+
+		$state = $this->transients['wwg_job_state'];
+		// The cancel that landed mid-batch must win -- not get
+		// overwritten by this batch's own stale 'running' read from
+		// before the cancel happened.
+		$this->assertSame( 'paused', $state['status'] );
+		// The real work this batch actually did (files genuinely written
+		// to disk by the time run_job_batch() returns) is kept either
+		// way -- only whether to call it 'running' and reschedule was
+		// ever in question.
+		$this->assertSame( 2, $state['stats']['converted'] );
+		$this->assertSame( 1, $state['cursor']['dir_index'] );
+		// Critically: no cron event left scheduled to keep the job
+		// resurrecting itself with no tab watching.
+		$this->assertSame( 0, $this->schedule_single_calls );
+	}
+
+	public function test_a_cancel_landing_during_the_counting_to_converting_flip_is_honored() {
+		$this->transients['wwg_job_state'] = $this->running_state(
+			array(
+				'phase'         => 'counting',
+				'total_dirs'    => 0,
+				'total_missing' => 0,
+			)
+		);
+
+		$admin = new WWG_Admin_Cancels_Mid_Batch(
+			$this->canned_batch( array( 'missing' => 3, 'missing_files' => 2, 'original_bytes' => 500 ), true, 2, 0 ),
+			function () {
+				$state             = $this->transients['wwg_job_state'];
+				$state['status']   = 'paused';
+				$this->transients['wwg_job_state'] = $state;
+			}
+		);
+		$job = new \WWG_Job( $admin );
+
+		$job->run_tick();
+
+		$state = $this->transients['wwg_job_state'];
+		$this->assertSame( 'paused', $state['status'] );
+		// The phase flip itself is still real, safe-to-keep progress --
+		// only 'running'+reschedule is what a concurrent cancel prevents.
+		$this->assertSame( 'converting', $state['phase'] );
+		$this->assertSame( 3, $state['total_missing'] );
+		$this->assertSame( 0, $this->schedule_single_calls );
+
+		// Library Status was still persisted from the counting walk that
+		// did complete -- a cancelled job shouldn't lose that on its way
+		// to (not) converting.
+		$this->assertSame( 3, $this->options['wwg_scan_state']['missing'] );
 	}
 
 	public function test_handle_start_job_is_a_noop_when_already_running() {
@@ -467,6 +762,51 @@ class JobTest extends TestCase {
 		$this->assertSame( 'stopped', $this->last_json['outcome'] );
 		$this->assertSame( 0, $admin->calls );
 		$this->assertArrayNotHasKey( 'wwg_job_lock', $this->transients );
+		// A pause is a live, still-frozen state -- not the fallback below,
+		// which is specifically for finding the job already 'done'.
+		$this->assertArrayNotHasKey( 'scan_state', $this->last_json );
+	}
+
+	/**
+	 * The race this closes: WP-Cron's own run_tick() (or another browser
+	 * tab) can finish the job -- including the counting-phase transition
+	 * that normally hands back a fresh $scan_state -- entirely between
+	 * this poll being sent and it arriving. Without the fallback in
+	 * process_one_batch()'s "not running at entry" branch, this poll
+	 * would report 'stopped'/'done' correctly but leave the client's
+	 * Library Status stuck on whatever it last knew, since this is the
+	 * only response it will ever see for this job.
+	 *
+	 * @covers \WWG_Job::process_one_batch
+	 */
+	public function test_handle_drive_job_reports_fresh_scan_state_when_already_done_at_entry() {
+		$this->transients['wwg_job_state'] = $this->running_state( array( 'status' => 'done' ) );
+		$this->options['wwg_scan_state']   = array(
+			'missing'              => 0,
+			'missing_files'        => 0,
+			'original_bytes'       => 0,
+			'total_images'         => 47382,
+			'original_bytes_total' => 300,
+			'webp_bytes'           => 100,
+			'avif_bytes'           => 80,
+			'webp_original_bytes'  => 200,
+			'avif_original_bytes'  => 200,
+			'webp_present'         => 47382,
+			'avif_present'         => 47382,
+			'failures'             => array(),
+			'finished_at'          => 12345,
+			'invalidated_at'       => null,
+		);
+
+		$admin = new WWG_Admin_Fake_Batch( new \WWG_Generator() );
+		$job   = new \WWG_Job( $admin );
+
+		$job->handle_drive_job();
+
+		$this->assertSame( 'stopped', $this->last_json['outcome'] );
+		$this->assertSame( 0, $admin->calls );
+		$this->assertArrayHasKey( 'scan_state', $this->last_json );
+		$this->assertSame( $this->options['wwg_scan_state'], $this->last_json['scan_state'] );
 	}
 
 	public function test_handle_drive_job_advances_then_completes_like_run_tick() {

@@ -170,7 +170,18 @@ class AdminBatchingTest extends TestCase {
 		);
 		Functions\when( 'get_option' )->alias(
 			function ( $key, $default = false ) {
-				return isset( $this->options[ $key ] ) ? $this->options[ $key ] : $default;
+				if ( isset( $this->options[ $key ] ) ) {
+					return $this->options[ $key ];
+				}
+				// wwg_scan_state defaults to "an established site" here --
+				// WWG_Format::enabled() now consults it (see
+				// user_wants()'s fresh-install-only smart default), and
+				// this file's own known-failures cache tests reset
+				// $this->options mid-test (see the "Reset the cache..."
+				// comment further down), which would otherwise flip these
+				// tests to a fresh-install default they were never
+				// written to expect.
+				return 'wwg_scan_state' === $key ? array( 'finished_at' => 1000 ) : $default;
 			}
 		);
 		Functions\when( 'update_option' )->alias(
@@ -187,6 +198,14 @@ class AdminBatchingTest extends TestCase {
 	}
 
 	private function remove_recursive( $dir ) {
+		if ( is_link( $dir ) ) {
+			// Removed as itself, never followed -- the symlinked-directory
+			// test below points one back at a real fixture folder still
+			// needing its own real cleanup; recursing through the link
+			// would delete that folder's contents out from under it.
+			unlink( $dir );
+			return;
+		}
 		if ( ! is_dir( $dir ) ) {
 			return;
 		}
@@ -195,7 +214,7 @@ class AdminBatchingTest extends TestCase {
 				continue;
 			}
 			$path = $dir . '/' . $entry;
-			is_dir( $path ) ? $this->remove_recursive( $path ) : unlink( $path );
+			is_link( $path ) || ! is_dir( $path ) ? unlink( $path ) : $this->remove_recursive( $path );
 		}
 		rmdir( $dir );
 	}
@@ -304,6 +323,58 @@ class AdminBatchingTest extends TestCase {
 		$this->assertFalse( $result['done'] );
 	}
 
+	private function scan_directories() {
+		Functions\when( 'get_transient' )->justReturn( false );
+		Functions\when( 'set_transient' )->justReturn( true );
+		Functions\when( 'untrailingslashit' )->alias(
+			function ( $string ) {
+				return rtrim( $string, '/' );
+			}
+		);
+
+		$admin = new \WWG_Admin( new \WWG_Generator() );
+		$ref   = new \ReflectionMethod( $admin, 'get_scan_directories' );
+		$ref->setAccessible( true );
+
+		return $ref->invoke( $admin );
+	}
+
+	/**
+	 * Proves collect_subdirectories()'s recursion actually descends more
+	 * than one level -- the fixture's own 2024/01 etc. never exercised
+	 * this, since those are already only one level under the root.
+	 *
+	 * @covers \WWG_Admin::collect_subdirectories
+	 */
+	public function test_get_scan_directories_finds_a_deeply_nested_subfolder() {
+		mkdir( $this->fixture_dir . '/2024/01/edits/final', 0777, true );
+
+		$dirs = $this->scan_directories();
+
+		$this->assertContains( '2024/01/edits', $dirs );
+		$this->assertContains( '2024/01/edits/final', $dirs );
+	}
+
+	/**
+	 * Same symlink-loop guard the RecursiveDirectoryIterator this method
+	 * used to be built on had (isLink() alongside isDir()) -- confirms
+	 * collect_subdirectories()'s own is_link() check still excludes a
+	 * symlinked directory (e.g. one pointing back at an ancestor, which
+	 * would recurse forever without this) rather than just trusting that
+	 * glob()'s own GLOB_ONLYDIR already rules it out (it doesn't -- a
+	 * symlink to a directory is itself reported as a directory).
+	 */
+	public function test_get_scan_directories_ignores_a_symlinked_directory() {
+		if ( ! function_exists( 'symlink' ) ) {
+			$this->markTestSkipped( 'symlink() unavailable on this platform.' );
+		}
+		symlink( $this->fixture_dir . '/2024', $this->fixture_dir . '/2024-link' );
+
+		$dirs = $this->scan_directories();
+
+		$this->assertNotContains( '2024-link', $dirs );
+	}
+
 	// ---- The "known clean" folder cache (OPTION_CLEAN_DIRS) ----
 
 	public function test_a_fully_clean_folder_gets_cached_and_a_second_pass_skips_real_work() {
@@ -317,9 +388,108 @@ class AdminBatchingTest extends TestCase {
 		$this->assertArrayHasKey( '2024/03', $this->options[ \WWG_Admin::OPTION_CLEAN_DIRS ] );
 
 		$second = $this->process_batch( $dirs, 0, 0, 'scan' ); // a fresh run over the same folder.
-		$this->assertSame( 0, $second['stats']['scanned'] ); // no real per-file work happened.
+		// No real per-file work happened (no filesize()/file_exists()
+		// calls) -- but this folder's own remembered total (1, cached by
+		// the first pass) still contributes to the whole-library figures
+		// Library Status reads, rather than a skipped folder silently
+		// contributing nothing. See OPTION_CLEAN_DIRS's own docblock.
+		$this->assertSame( 1, $second['stats']['scanned'] );
 		$this->assertSame( 1, $second['dir_index'] );
 		$this->assertTrue( $second['skipped'] );
+	}
+
+	public function test_a_cache_hit_contributes_its_remembered_byte_totals_too() {
+		$dir = $this->fixture_dir . '/2024/15';
+		mkdir( $dir, 0777, true );
+		file_put_contents( $dir . '/f.jpg', str_repeat( 'a', 1000 ) );
+		file_put_contents( $dir . '/f.webp', str_repeat( 'b', 400 ) );
+
+		$dirs = array( '2024/15' );
+
+		$first = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertSame( 1000, $first['stats']['original_bytes_total'] );
+		$this->assertSame( 1000, $first['stats']['webp_original_bytes'] );
+		$this->assertSame( 400, $first['stats']['webp_bytes'] );
+		$this->assertSame( 1, $first['stats']['webp_present'] );
+		$this->assertArrayHasKey( '2024/15', $this->clean_dirs() );
+
+		$second = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertTrue( $second['skipped'] );
+		// The folder's own remembered byte/count totals (cached by the
+		// first pass) still contribute, not just its file count -- this
+		// is the whole point of extending the cache: Library Status's
+		// Original/WebP/AVIF table must stay accurate even once a stable
+		// library is mostly cache-skipped on every later scan.
+		$this->assertSame( 1000, $second['stats']['original_bytes_total'] );
+		$this->assertSame( 1000, $second['stats']['webp_original_bytes'] );
+		$this->assertSame( 400, $second['stats']['webp_bytes'] );
+		$this->assertSame( 1, $second['stats']['webp_present'] );
+	}
+
+	public function test_a_pre_totals_cache_entry_forces_one_real_rewalk_then_becomes_a_true_hit() {
+		$dir = $this->fixture_dir . '/2024/03'; // already-clean fixture folder (e.jpg/e.webp).
+
+		// Simulate an entry written before whole-library totals existed
+		// at all -- the exact shape mark_known_clean() used to write,
+		// with no `totals` key.
+		$this->options[ \WWG_Admin::OPTION_CLEAN_DIRS ] = array(
+			'2024/03' => array(
+				'mtime'   => filemtime( $dir ),
+				'formats' => array( 'webp' ),
+			),
+		);
+
+		$dirs = array( '2024/03' );
+
+		// The entry would otherwise validate (mtime and formats both
+		// match) -- but having no `totals` key must still force one real
+		// walk, so this folder's contribution is backfilled instead of
+		// silently excluded forever.
+		$backfill = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertFalse( $backfill['skipped'] );
+		$this->assertSame( 1, $backfill['stats']['scanned'] );
+		$this->assertArrayHasKey( 'totals', $this->clean_dirs()['2024/03'] );
+
+		// Every check after that backfill is a true, fully-accurate hit.
+		$hit = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertTrue( $hit['skipped'] );
+		$this->assertSame( 1, $hit['stats']['scanned'] );
+	}
+
+	public function test_a_partial_totals_cache_entry_also_forces_one_real_rewalk() {
+		$dir = $this->fixture_dir . '/2024/03'; // already-clean fixture folder (e.jpg/e.webp).
+
+		// Simulate an entry written after whole-library totals existed,
+		// but before the Original/WebP/AVIF table's own *_present counts
+		// did -- a `totals` key that's present but incomplete, not
+		// absent. Must be treated the same as a fully-missing `totals`:
+		// force one real walk to backfill the two new fields, rather
+		// than silently treating this as a complete hit forever.
+		$this->options[ \WWG_Admin::OPTION_CLEAN_DIRS ] = array(
+			'2024/03' => array(
+				'mtime'   => filemtime( $dir ),
+				'formats' => array( 'webp' ),
+				'totals'  => array(
+					'scanned'             => 1,
+					'webp_bytes'          => 0,
+					'avif_bytes'          => 0,
+					'webp_original_bytes' => 0,
+					'avif_original_bytes' => 0,
+					// No 'webp_present'/'avif_present'/'original_bytes_total' --
+					// the exact intermediate shape this test is about.
+				),
+			),
+		);
+
+		$dirs = array( '2024/03' );
+
+		$backfill = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertFalse( $backfill['skipped'] );
+		$this->assertArrayHasKey( 'webp_present', $this->clean_dirs()['2024/03']['totals'] );
+
+		$hit = $this->process_batch( $dirs, 0, 0, 'scan' );
+		$this->assertTrue( $hit['skipped'] );
+		$this->assertSame( 1, $hit['stats']['webp_present'] );
 	}
 
 	public function test_a_directory_mtime_change_forces_a_real_recheck() {
@@ -547,8 +717,12 @@ class AdminBatchingTest extends TestCase {
 
 		$third = $this->process_batch( $dirs, 0, 0, 'convert' );
 		$this->assertTrue( $third['skipped'] );
-		$this->assertSame( 0, $third['stats']['scanned'] ); // the whole point -- x.jpg/y.jpg were never re-walked.
-		$this->assertSame( 1, $third['stats']['failed'] ); // ...but the known failure is still surfaced, not silently dropped.
+		// x.jpg/y.jpg/broken.jpg were never re-walked this pass -- but the
+		// folder's own remembered total (3, cached by the second pass'
+		// real walk) still contributes to the whole-library figures,
+		// rather than a skipped folder contributing nothing.
+		$this->assertSame( 3, $third['stats']['scanned'] );
+		$this->assertSame( 1, $third['stats']['failed'] ); // ...and the known failure is still surfaced too, not silently dropped.
 		$this->assertSame( '2024/11/broken.jpg', $third['stats']['failures'][0]['file'] );
 	}
 
@@ -624,7 +798,10 @@ class AdminBatchingTest extends TestCase {
 
 		$skipped_scan = $this->process_batch( $dirs, 0, 0, 'scan' );
 		$this->assertTrue( $skipped_scan['skipped'] );
-		$this->assertSame( 0, $skipped_scan['stats']['scanned'] );
+		// The folder's own remembered total (1, cached by the reconfirming
+		// scan just above) still contributes, same reasoning as the other
+		// cache-hit tests in this file.
+		$this->assertSame( 1, $skipped_scan['stats']['scanned'] );
 		$this->assertSame( 1, $skipped_scan['stats']['failed'] ); // still reported, even though skipped.
 	}
 
@@ -675,6 +852,38 @@ class AdminBatchingTest extends TestCase {
 
 		$this->assertSame( 1, $result['stats']['missing'] );
 		$this->assertSame( 1, $result['stats']['missing_files'] );
+	}
+
+	/**
+	 * Regression test for the "X vs. originals" stat tiles: a format that
+	 * needed nothing at all for this file must still have its existing
+	 * bytes feed the tile's live numerator/denominator, since the file
+	 * was visited this run regardless of which formats it turned out to
+	 * need. Without this, a format that's already fully caught up would
+	 * never accumulate anything and would sit at a static "0 B vs. 0 B"
+	 * for the entire run instead of visibly keeping pace as the tree is
+	 * walked.
+	 */
+	public function test_a_file_that_already_has_one_format_still_feeds_that_formats_running_totals() {
+		$this->enable_both_formats();
+
+		$dir = $this->fixture_dir . '/2024/17';
+		mkdir( $dir, 0777, true );
+		file_put_contents( $dir . '/already-webp.jpg', str_repeat( 'x', 1000 ) );
+		file_put_contents( $dir . '/already-webp.webp', str_repeat( 'y', 400 ) ); // webp already exists -- only avif is actually missing.
+
+		$dirs   = array( '2024/17' );
+		$result = $this->process_batch( $dirs, 0, 0, 'scan' );
+
+		// Nothing was missing for webp, but the file was still walked, so
+		// its already-existing .webp size feeds webp_bytes and its
+		// original size feeds webp_original_bytes -- same original size
+		// also feeds avif_original_bytes, since avif genuinely is missing
+		// here (scan mode never creates anything, so avif_bytes stays 0).
+		$this->assertSame( 400, $result['stats']['webp_bytes'] );
+		$this->assertSame( 1000, $result['stats']['webp_original_bytes'] );
+		$this->assertSame( 0, $result['stats']['avif_bytes'] );
+		$this->assertSame( 1000, $result['stats']['avif_original_bytes'] );
 	}
 
 	public function test_converting_a_file_where_one_format_succeeds_and_the_other_fails_tallies_each_independently() {

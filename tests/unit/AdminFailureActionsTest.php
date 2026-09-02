@@ -82,7 +82,18 @@ class AdminFailureActionsTest extends TestCase {
 		);
 		Functions\when( 'get_option' )->alias(
 			function ( $key, $default = false ) {
-				return isset( $this->options[ $key ] ) ? $this->options[ $key ] : $default;
+				if ( isset( $this->options[ $key ] ) ) {
+					return $this->options[ $key ];
+				}
+				// wwg_scan_state defaults to "an established site" here
+				// (only when a test hasn't already seeded its own, e.g.
+				// to exercise a real scan_state.failures fixture) --
+				// WWG_Format::enabled() now consults it (see
+				// user_wants()'s fresh-install-only smart default), and
+				// none of this file's tests are about that default, so
+				// they get the plain "true unless explicitly unchecked"
+				// behavior they were originally written to expect.
+				return 'wwg_scan_state' === $key ? array( 'finished_at' => 1000 ) : $default;
 			}
 		);
 		Functions\when( 'update_option' )->alias(

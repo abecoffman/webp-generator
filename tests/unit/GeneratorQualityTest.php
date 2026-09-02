@@ -13,26 +13,26 @@ use Brain\Monkey\Functions;
  */
 class GeneratorQualityTest extends TestCase {
 
-	public function test_default_is_75_when_webp_option_not_set() {
+	public function test_default_is_80_when_webp_option_not_set() {
 		Functions\expect( 'get_option' )
 			->once()
-			->with( 'wwg_quality', 75 )
-			->andReturn( 75 );
+			->with( 'wwg_quality', 80 )
+			->andReturn( 80 );
 
 		$generator = new \WWG_Generator();
 
-		$this->assertSame( 75, $generator->get_quality( 'webp' ) );
+		$this->assertSame( 80, $generator->get_quality( 'webp' ) );
 	}
 
-	public function test_default_is_75_when_avif_option_not_set() {
+	public function test_default_is_85_when_avif_option_not_set() {
 		Functions\expect( 'get_option' )
 			->once()
-			->with( 'wwg_quality_avif', 75 )
-			->andReturn( 75 );
+			->with( 'wwg_quality_avif', 85 )
+			->andReturn( 85 );
 
 		$generator = new \WWG_Generator();
 
-		$this->assertSame( 75, $generator->get_quality( 'avif' ) );
+		$this->assertSame( 85, $generator->get_quality( 'avif' ) );
 	}
 
 	public function test_returns_the_default_for_an_unrecognized_format_without_reading_any_option() {
@@ -40,7 +40,7 @@ class GeneratorQualityTest extends TestCase {
 
 		$generator = new \WWG_Generator();
 
-		$this->assertSame( 75, $generator->get_quality( 'heic' ) );
+		$this->assertSame( 80, $generator->get_quality( 'heic' ) );
 	}
 
 	/**

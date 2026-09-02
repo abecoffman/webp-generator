@@ -17,16 +17,15 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class WWG_Admin {
 
-	const AJAX_ACTION              = 'wwg_process_batch';
-	const ACTION_SAVE_SCAN         = 'wwg_save_scan_result';
-	const ACTION_CLASSIFY_FAILURES = 'wwg_classify_failures';
-	const ACTION_FIX_FAILURE       = 'wwg_fix_failure';
-	const ACTION_DELETE_FAILURE    = 'wwg_delete_failure';
-	const NONCE_ACTION             = 'wwg_admin';
-	const SETTINGS_NONCE           = 'wwg_settings';
-	const HTACCESS_NONCE           = 'wwg_htaccess';
-	const CAPABILITY               = 'manage_options';
-	const PAGE_SLUG                = 'webp-generator';
+	const ACTION_CLASSIFY_FAILURES   = 'wwg_classify_failures';
+	const ACTION_FIX_FAILURE         = 'wwg_fix_failure';
+	const ACTION_DELETE_FAILURE      = 'wwg_delete_failure';
+	const ACTION_SAVE_SETTINGS       = 'wwg_save_settings';
+	const ACTION_GENERATE_ATTACHMENT = 'wwg_generate_attachment';
+	const NONCE_ACTION               = 'wwg_admin';
+	const HTACCESS_NONCE             = 'wwg_htaccess';
+	const CAPABILITY                 = 'manage_options';
+	const PAGE_SLUG                  = 'webp-generator';
 
 	/**
 	 * How many files list_images_in_dir() results process_batch() looks
@@ -62,15 +61,24 @@ class WWG_Admin {
 	 * to have nothing further to do, as of that value's mtime, for a
 	 * specific set of enabled formats. The value is either a bare mtime
 	 * int (a pre-AVIF entry -- only WebP could have been considered), or
-	 * an {mtime, formats, known_failures?} array -- `formats` records
-	 * which enabled format ids were actually checked when this was
-	 * cached, so a format gaining server support later (or a
+	 * an {mtime, formats, known_failures?, totals?} array -- `formats`
+	 * records which enabled format ids were actually checked when this
+	 * was cached, so a format gaining server support later (or a
 	 * wwg_enabled_formats filter loosening) correctly invalidates a
 	 * folder that's still genuinely clean for the formats it already knew
 	 * about (see is_known_clean()'s format-staleness check); `known_
 	 * failures`, if present, is a list of {file, format} pairs -- see
 	 * OPTION_KNOWN_FAILURES -- when the only missing conversions are
-	 * known, already-confirmed-stable failures. Shared between scan and
+	 * known, already-confirmed-stable failures. `totals`, if present, is
+	 * this folder's own {scanned, webp_bytes, avif_bytes,
+	 * webp_original_bytes, avif_original_bytes} contribution (see
+	 * process_batch()'s own $stats docblock for what each of those
+	 * means) -- lets a cache HIT still contribute this folder's real
+	 * numbers to Library Status's whole-library totals without re-
+	 * walking it (see is_known_clean()); an entry with no `totals` key
+	 * (written before this existed) is treated as a miss so it gets
+	 * backfilled the next time it's checked, same as a `formats`
+	 * mismatch already forces a recheck today. Shared between scan and
 	 * convert -- "this folder has nothing [further] missing" is the same
 	 * fact regardless of which mode discovered it. Either mode can now
 	 * single-batch-verify (and so cache) a folder of any size on its own,
@@ -135,14 +143,23 @@ class WWG_Admin {
 	 * that a resumable in-progress state isn't needed -- this only ever
 	 * holds the result of a scan that actually finished.
 	 *
-	 * Shape: {missing, missing_files, original_bytes, failures[],
+	 * Shape: {missing, missing_files, original_bytes, total_images,
+	 * original_bytes_total, webp_bytes, avif_bytes, webp_original_bytes,
+	 * avif_original_bytes, webp_present, avif_present, failures[],
 	 * finished_at, invalidated_at}. "missing" counts (file, format)
-	 * conversion units still needed (what the progress bar tracks against);
-	 * "missing_files" counts distinct files needing at least one of them
-	 * (what the headline sentence reports) -- a file needing both WebP and
-	 * AVIF counts once in missing_files but twice in missing. Each
-	 * failures[] entry is {file, format, error}. Self-invalidates on the
-	 * specific event that makes
+	 * conversion units still needed (what the progress bar tracks
+	 * against); "missing_files" counts distinct files needing at least
+	 * one of them (what the headline sentence reports) -- a file needing
+	 * both WebP and AVIF counts once in missing_files but twice in
+	 * missing. "total_images"/"original_bytes_total"/the four *_bytes
+	 * fields/the two *_present counts are the *whole* library's own
+	 * totals (every file the counting pass visited or had remembered via
+	 * OPTION_CLEAN_DIRS, not just the missing subset) -- what Library
+	 * Status's own Original/WebP/AVIF table is built from (image count
+	 * and total size per row; *_present is that row's image count,
+	 * *_bytes/*_original_bytes its size vs. the Original row's own).
+	 * Each failures[] entry is {file, format, error}. Self-invalidates
+	 * on the specific event that makes
 	 * it wrong (a Generate run that actually converts something -- see
 	 * mark_scan_state_stale(), called from WWG_Job) rather than a bare
 	 * TTL, so it never silently goes stale while still claiming to be
@@ -191,31 +208,36 @@ class WWG_Admin {
 	public function init() {
 		add_action( 'admin_menu', array( $this, 'register_page' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
-		add_action( 'wp_ajax_' . self::AJAX_ACTION, array( $this, 'handle_ajax' ) );
-		add_action( 'wp_ajax_' . self::ACTION_SAVE_SCAN, array( $this, 'handle_save_scan_result' ) );
 		add_action( 'wp_ajax_' . self::ACTION_CLASSIFY_FAILURES, array( $this, 'handle_classify_failures' ) );
 		add_action( 'wp_ajax_' . self::ACTION_FIX_FAILURE, array( $this, 'handle_fix_failure' ) );
 		add_action( 'wp_ajax_' . self::ACTION_DELETE_FAILURE, array( $this, 'handle_delete_failure' ) );
-		add_action( 'admin_init', array( $this, 'maybe_save_settings' ) );
+		add_action( 'wp_ajax_' . self::ACTION_SAVE_SETTINGS, array( $this, 'handle_save_settings' ) );
+		add_action( 'wp_ajax_' . self::ACTION_GENERATE_ATTACHMENT, array( $this, 'handle_generate_attachment' ) );
 		add_action( 'admin_init', array( $this, 'maybe_handle_htaccess_action' ) );
+		add_filter( 'manage_media_columns', array( $this, 'add_compression_column' ) );
+		add_action( 'manage_media_custom_column', array( $this, 'render_compression_column' ), 10, 2 );
 	}
 
 	/**
-	 * Handle the small settings form at the top of Tools > WebP Generator
-	 * (currently just quality). A plain POST-and-redirect rather than the
-	 * full Settings API, since it's one field on a Tools page rather than
-	 * a proper Settings page.
+	 * AJAX: autosave the Settings card the instant a checkbox is toggled
+	 * or a quality value changes -- no Save button, no page reload (see
+	 * admin.js's wireSettingsAutosave()). The client always sends the
+	 * CURRENT state of every supported format's checkbox/quality
+	 * together, not just whatever one field just changed, so this stays
+	 * exactly the same logic the old form-POST-and-redirect version of
+	 * this always ran: a checkbox's absence from the request still means
+	 * "unchecked", never "wasn't part of this particular change".
+	 *
+	 * @return void Sends a JSON response and exits.
 	 */
-	public function maybe_save_settings() {
-		if ( ! isset( $_POST['wwg_save_settings'] ) ) {
-			return;
-		}
-
-		check_admin_referer( self::SETTINGS_NONCE );
+	public function handle_save_settings() {
+		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
 
 		if ( ! current_user_can( self::CAPABILITY ) ) {
-			return;
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
 		}
+
+		$enabled_before = WWG_Format::enabled();
 
 		if ( isset( $_POST['wwg_quality'] ) ) {
 			$quality = max( 1, min( 100, absint( $_POST['wwg_quality'] ) ) );
@@ -226,22 +248,40 @@ class WWG_Admin {
 			update_option( WWG_Format::OPTION_QUALITY_AVIF, $quality );
 		}
 
-		wp_safe_redirect(
-			add_query_arg(
-				array(
-					'page'             => self::PAGE_SLUG,
-					'settings-updated' => 'true',
-				),
-				admin_url( 'tools.php' )
-			)
-		);
-		exit;
+		foreach ( WWG_Format::all() as $id => $def ) {
+			if ( ! WWG_Format::has_support( $id ) ) {
+				continue; // Never offered a checkbox for this -- nothing on the request to read, and nothing to silently disable.
+			}
+			// A checkbox is only present in the request at all when
+			// checked -- standard HTML semantics, and admin.js's
+			// currentSettingsFields() follows that same convention on
+			// purpose -- so its absence here genuinely means "unchecked",
+			// not "wasn't on the page" (the continue above already ruled
+			// that case out).
+			update_option( $def['enabled_option'], isset( $_POST[ $def['enabled_option'] ] ) );
+		}
+
+		// Library Status's "N images missing" count describes a specific
+		// set of formats -- if that set just changed, the old count is
+		// now describing something that no longer matches reality, same
+		// as when a Generate run itself changes the library (see
+		// mark_scan_state_stale()'s own docblock). Told to the client in
+		// the response below so Region 1 can reflect it immediately,
+		// without the full-page reload the old redirect-based version of
+		// this used to get that update for free.
+		if ( WWG_Format::enabled() !== $enabled_before ) {
+			$this->mark_scan_state_stale();
+		}
+
+		wp_send_json_success( array( 'scanState' => $this->get_scan_state() ) );
 	}
 
 	/**
 	 * Handle the "Add this rule to my .htaccess" / "Remove it" buttons on
-	 * the Setup & status panel. Same plain POST-and-redirect pattern as
-	 * maybe_save_settings().
+	 * the Setup & status panel -- a plain POST-and-redirect, unlike
+	 * Settings' own autosave (see handle_save_settings()), since these
+	 * are deliberate one-off actions a user clicks, not a value that
+	 * changes freely.
 	 */
 	public function maybe_handle_htaccess_action() {
 		$action = isset( $_POST['wwg_htaccess_action'] ) ? sanitize_key( $_POST['wwg_htaccess_action'] ) : '';
@@ -289,6 +329,49 @@ class WWG_Admin {
 	 * @param string $hook Current admin page hook suffix.
 	 */
 	public function enqueue_assets( $hook ) {
+		// Media Library's list view (screen hook 'upload.php') needs the
+		// stylesheet for the "WebP/AVIF" column's .wwg-chip/.wwg-cc-*
+		// classes, plus (for anyone who could actually use it) a small
+		// standalone script for that column's own "Generate" button --
+		// see render_compression_column()'s 'partial' branch and
+		// assets/media-library.js. Deliberately its own tiny script, not
+		// assets/admin.js -- that file's whole closure is built around
+		// the Tools page's job/scan state, none of which exists here.
+		if ( 'upload.php' === $hook ) {
+			wp_enqueue_style(
+				'wwg-admin',
+				plugins_url( 'assets/admin.css', WWG_FILE ),
+				array(),
+				WWG_VERSION
+			);
+
+			if ( current_user_can( self::CAPABILITY ) ) {
+				wp_enqueue_script(
+					'wwg-media-library',
+					plugins_url( 'assets/media-library.js', WWG_FILE ),
+					array(),
+					WWG_VERSION,
+					true
+				);
+
+				$strings = self::get_strings();
+				wp_localize_script(
+					'wwg-media-library',
+					'wwgMediaLibrary',
+					array(
+						'ajaxUrl'        => admin_url( 'admin-ajax.php' ),
+						'generateAction' => self::ACTION_GENERATE_ATTACHMENT,
+						'nonce'          => wp_create_nonce( self::NONCE_ACTION ),
+						'strings'        => array(
+							'generating' => $strings['generatingLabel'],
+							'error'      => $strings['error'],
+						),
+					)
+				);
+			}
+			return;
+		}
+
 		if ( 'tools_page_' . self::PAGE_SLUG !== $hook ) {
 			return;
 		}
@@ -318,16 +401,15 @@ class WWG_Admin {
 			'wwg-admin',
 			'wwgAdmin',
 			array(
-				'ajaxUrl'        => admin_url( 'admin-ajax.php' ),
-				'action'         => self::AJAX_ACTION,
-				'scanSaveAction' => self::ACTION_SAVE_SCAN,
-				'classifyAction' => self::ACTION_CLASSIFY_FAILURES,
-				'fixAction'      => self::ACTION_FIX_FAILURE,
-				'deleteAction'   => self::ACTION_DELETE_FAILURE,
-				'nonce'          => wp_create_nonce( self::NONCE_ACTION ),
-				'jobState'       => $this->job->get_hydrated_state(),
-				'scanState'      => $this->get_scan_state(),
-				'jobActions'     => array(
+				'ajaxUrl'            => admin_url( 'admin-ajax.php' ),
+				'classifyAction'     => self::ACTION_CLASSIFY_FAILURES,
+				'fixAction'          => self::ACTION_FIX_FAILURE,
+				'deleteAction'       => self::ACTION_DELETE_FAILURE,
+				'saveSettingsAction' => self::ACTION_SAVE_SETTINGS,
+				'nonce'              => wp_create_nonce( self::NONCE_ACTION ),
+				'jobState'           => $this->job->get_hydrated_state(),
+				'scanState'          => $this->get_scan_state(),
+				'jobActions'         => array(
 					'start'  => WWG_Job::ACTION_START,
 					'status' => WWG_Job::ACTION_STATUS,
 					'cancel' => WWG_Job::ACTION_CANCEL,
@@ -338,9 +420,9 @@ class WWG_Admin {
 				// that supports both. admin.js uses this to build both-
 				// format-aware copy/stat tiles without hardcoding "WebP"/
 				// "AVIF" anywhere client-side.
-				'enabledFormats' => $enabled_formats,
-				'formatLabels'   => $format_labels,
-				'strings'        => self::get_strings(),
+				'enabledFormats'     => $enabled_formats,
+				'formatLabels'       => $format_labels,
+				'strings'            => self::get_strings(),
 			)
 		);
 	}
@@ -379,65 +461,62 @@ class WWG_Admin {
 
 		return array(
 			/* translators: %s: format name(s) that will be generated, e.g. "WebP" or "WebP and AVIF". */
-			'confirmGenerate'              => sprintf( __( 'Generate %s versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'webp-generator' ), $format_and ),
-			// Static label for Region 1's status chip in its idle/done
-			// substates -- while actively scanning, admin.js swaps the
-			// chip to scanningLabel below instead.
-			'libraryStatusLabel'           => __( 'Library status', 'webp-generator' ),
-			'scanningLabel'                => __( 'Scanning…', 'webp-generator' ),
-			'generatingLabel'              => __( 'Generating…', 'webp-generator' ),
-			'pausedLabel'                  => __( 'Paused', 'webp-generator' ),
-			/* translators: %s: date and time the run finished, e.g. "Aug 10, 2026, 5:46 PM" -- formatted client-side in the visitor's own locale/timezone. Region 3's status chip once a Generate run is done. */
-			'lastRunLabel'                 => __( 'Last run — %s', 'webp-generator' ),
+			'confirmGenerate'             => sprintf( __( 'Generate %s versions of these images now? This writes new files alongside the originals -- nothing existing gets deleted or replaced.', 'webp-generator' ), $format_and ),
+			'scanningLabel'               => __( 'Scanning…', 'webp-generator' ),
+			// The progress bar's own label, for the sliver of time after
+			// clicking Generate before the very first real batch has come
+			// back at all -- either the brief window before wwg_start_job
+			// itself has even resolved (no jobState from the server yet),
+			// or the one tick just after it where jobState exists but its
+			// total_dirs is still the fresh job's own default of 0. Without
+			// this, that stretch would show a bare, contentless "0% (0 / 0
+			// folders)" -- technically accurate, but reads like nothing is
+			// happening (or worse, that it already finished with nothing to
+			// do) rather than "still counting up how big this job is".
+			'startingLabel'               => __( 'Starting…', 'webp-generator' ),
+			'generatingLabel'             => __( 'Generating…', 'webp-generator' ),
+			'pausedLabel'                 => __( 'Paused', 'webp-generator' ),
+			/* translators: %s: date and time the library was last counted, e.g. "Aug 10, 2026, 5:46 PM" -- formatted client-side in the visitor's own locale/timezone. Shown as a small badge in the Library Status table's own header, next to the row-label column, once a count has completed. */
+			'asOfLabel'                   => __( 'As of %s', 'webp-generator' ),
 			// Region 1's headline before any scan has ever completed, or
 			// once a completed scan has been invalidated back to unknown
 			// (see 'notCheckedYetFirstTime'/'notCheckedYetInvalidated' for
-			// which meta line pairs with this).
-			'notCheckedYet'                => __( 'Not checked yet.', 'webp-generator' ),
+			// which meta line pairs with this). No standalone Scan button
+			// exists anymore -- Generate's own first phase counts the
+			// library itself (see WWG_Job's counting/converting phases),
+			// so both point at clicking Generate instead.
+			'notCheckedYet'               => __( 'Not checked yet.', 'webp-generator' ),
 			/* translators: %s: format name(s), e.g. "WebP" or "WebP or AVIF". */
-			'notCheckedYetFirstTime'       => sprintf( __( 'Click Scan to see how many images need a %s version.', 'webp-generator' ), $format_or ),
+			'notCheckedYetFirstTime'      => sprintf( __( 'Click Generate to see how many images need a %s version.', 'webp-generator' ), $format_or ),
 			// Shown instead of the above once a Generate run has actually
-			// changed the library since the last scan (see
+			// changed the library since the last count (see
 			// WWG_Admin::mark_scan_state_stale(), called from WWG_Job) --
 			// explains *why* Library Status reset instead of leaving the
-			// admin to wonder if a scan they remember running got lost.
-			'notCheckedYetInvalidated'     => __( 'You generated images since the last check -- click Scan to see what’s left.', 'webp-generator' ),
-			/* translators: %s: folder path currently being scanned, e.g. "2024/03". Substituted client-side in admin.js. */
-			'checking'                     => __( 'Checking %s…', 'webp-generator' ),
-			/* translators: %s: folder path currently being processed, e.g. "2024/03". Substituted client-side in admin.js. */
-			'converting'                   => __( 'Generating %s…', 'webp-generator' ),
-			/* translators: %s: folder path currently being walked, e.g. "2024/03". Substituted client-side in admin.js. Shown once every missing image Scan found has already been processed -- the run keeps walking the rest of the library to catch anything Scan might have missed, but isn't converting anything new, so this deliberately doesn't say "Generating" like the string above. */
-			'stillScanning'                => __( 'All missing images found -- finishing folder scan (%s)…', 'webp-generator' ),
-			'uploadsRoot'                  => __( 'the uploads folder', 'webp-generator' ),
-			/* translators: %d: number of images generated so far. */
-			'generatedSoFar'               => __( '%d images generated so far…', 'webp-generator' ),
-			/* translators: %d: number of images generated. Shown once every missing image Scan found has been processed -- unlike 'generatedSoFar' above, this is the final count for this run (only the "finishing folder scan" walk is left, which won't change it further), so it deliberately doesn't say "so far". */
-			'generatedFinal'               => __( '%d image(s) generated.', 'webp-generator' ),
-			/* translators: %s: format name(s), e.g. "WebP" or "WebP and AVIF". */
-			'missingNone'                  => sprintf( __( 'Every image already has a %s version.', 'webp-generator' ), $format_and ),
-			/* translators: 1: number of images (always > 1), 2: combined file size, e.g. "3.2 MB", 3: format name(s), e.g. "WebP or AVIF". */
-			'missingPlural'                => sprintf( __( '%%1$d images are missing a %s version (%%2$s).', 'webp-generator' ), $format_or ),
-			/* translators: 1: combined file size, e.g. "420 KB", 2: format name(s), e.g. "WebP or AVIF". */
-			'missingSingular'              => sprintf( __( '1 image is missing a %s version (%%2$s).', 'webp-generator' ), $format_or ),
-			// Appended after missingSingular/missingPlural above, only when
-			// some (or all) of that same missing count is already known --
-			// from an earlier run -- to permanently fail. Deliberately its
-			// own "Of these, N..." sentence rather than reusing
-			// failedSummary below: failedSummary's "%d failed" describes an
-			// attempt that just happened (Convert/Generate just ran), which
-			// isn't true here (Scan never attempts a conversion) -- and
-			// unlike Convert's generated/failed counts, which are disjoint,
-			// this count is a *subset* of the missing count in the sentence
-			// right before it, so it needs to read as "of those, some are
-			// already known-dead" rather than a second, seemingly separate
-			// number.
-			/* translators: %d: how many of the missing images above (always > 1) already have a known, permanent failure reason on record. */
-			'missingKnownFailuresPlural'   => __( 'Of these, %d are already known to permanently fail -- see "Failed conversions" for details.', 'webp-generator' ),
-			// Used instead of the above when that count is exactly 1 -- its
-			// own string (not a %d substitution) to avoid "Of these, 1 are…".
-			'missingKnownFailuresSingular' => __( 'Of these, 1 is already known to permanently fail -- see "Failed conversions" for details.', 'webp-generator' ),
-			/* translators: %s: date and time Scan's last completed pass finished, e.g. "Aug 10, 2026, 5:46 PM" -- formatted client-side. Region 1's meta line once a valid scan result exists. */
-			'asOf'                         => __( 'As of %s.', 'webp-generator' ),
+			// admin to wonder if a count they remember happening got lost.
+			'notCheckedYetInvalidated'    => __( 'You generated images since the last check -- click Generate to see what’s left.', 'webp-generator' ),
+			// All three of these are appended directly onto the shared
+			// progress bar's own "N% (X / Y folders/images)" line (see
+			// renderStatusScanning()/renderResultsRunning() in admin.js),
+			// never shown as a separate sentence/line of their own -- that
+			// used to put multiple redundant statements of "how far along
+			// is this" on screen at once (the progress bar, a folder line,
+			// and a "so far" summary). Deliberately short clause
+			// fragments, not full sentences, and deliberately don't repeat
+			// the count they're appended after.
+			/* translators: %s: folder path currently being counted, e.g. "2024/03". */
+			'checkingFolder'              => __( 'currently checking folder "%s"', 'webp-generator' ),
+			/* translators: %s: folder path currently being processed, e.g. "2024/03". */
+			'converting'                  => __( 'currently on folder "%s"', 'webp-generator' ),
+			// Same clause-fragment shape as the others here -- shown once
+			// every missing image Scan found has already been processed
+			// and the run is just walking the rest of the library to
+			// catch anything Scan might have missed (not converting
+			// anything new), so this deliberately says "folder scan", not
+			// "on folder", like the string above.
+			/* translators: %s: folder path currently being walked, e.g. "2024/03". */
+			'stillScanning'               => __( 'finishing folder scan on "%s"', 'webp-generator' ),
+			/* translators: %d: number of images generated. Shown once every missing image Scan found has been processed (only the "finishing folder scan" walk, which won't change this further, may still be running) -- while real conversion work is still in progress, this line is deliberately left empty instead of repeating a running tally the progress line above already shows. */
+			'generatedFinal'              => __( '%d image(s) generated.', 'webp-generator' ),
 			// Full "Done -- generated N, M failed" phrasing for contexts
 			// with no other supporting UI around them -- the completion
 			// notice (WWG_Job::maybe_render_notice()) and the Heartbeat
@@ -445,9 +524,21 @@ class WWG_Admin {
 			// NOT use this for its own summary -- see 'generatedFinal'/
 			// 'failedSummary' above for what it uses instead.
 			/* translators: %d: number of images. */
-			'generateDone'                 => __( 'Done -- generated %d image(s).', 'webp-generator' ),
+			'generateDone'                => __( 'Done -- generated %d image(s).', 'webp-generator' ),
 			/* translators: %d: number of images that failed to convert. Deliberately doesn't say "below"/"above" -- this string is reused in more than one place on the page relative to the "Failed conversions" panel it points at, so a directional reference goes stale wherever it ends up on the wrong side. */
-			'failedSummary'                => __( '%d failed -- see "Failed conversions" for details.', 'webp-generator' ),
+			'failedSummary'               => __( '%d failed -- see "Failed conversions" for details.', 'webp-generator' ),
+			// Last Run's own compact "%d failed" clause -- failedSummary
+			// above stays generic for the completion notice/Heartbeat
+			// (see their own docblocks), but on the tool page itself
+			// "still missing a WebP/AVIF version" (naming which format(s),
+			// same $format_or pattern as 'notCheckedYetFirstTime') reads
+			// more plainly than "failed" for someone just skimming a
+			// receipt. Still points at "Failed conversions", which now
+			// lives in the Library Status card right above Last Run.
+			/* translators: 1: number of images (always > 1) still missing a converted version after this run, 2: format name(s), e.g. "WebP or AVIF". */
+			'stillMissingSummaryPlural'   => sprintf( __( '%%1$d still missing a %s version -- see "Failed conversions" above for details.', 'webp-generator' ), $format_or ),
+			/* translators: %s: format name(s), e.g. "WebP or AVIF". */
+			'stillMissingSummarySingular' => sprintf( __( '1 still missing a %s version -- see "Failed conversions" above for details.', 'webp-generator' ), $format_or ),
 			// "...so these take effect right away" is accurate here
 			// specifically because this string's only other use (the
 			// completion notice/Heartbeat update) is always seen fresh --
@@ -456,46 +547,44 @@ class WWG_Admin {
 			// summary (see 'cacheClearedPast' below for that) -- that
 			// state survives indefinitely across reloads, where "right
 			// away" would misleadingly imply the run just happened.
-			'cacheCleared'                 => __( 'Also cleared the page cache so these take effect right away.', 'webp-generator' ),
+			'cacheCleared'                => __( 'Also cleared the page cache so these take effect right away.', 'webp-generator' ),
 			// Same underlying fact as 'cacheCleared' above, worded so it
 			// reads correctly no matter how long ago the run actually
 			// finished -- used in Region 3's done-state summary, which
 			// (unlike the notice) is exactly the "possibly reading this
 			// days later" context 'cacheCleared' isn't safe for.
-			'cacheClearedPast'             => __( 'The page cache was also cleared as part of that run.', 'webp-generator' ),
-			'resumeGenerating'             => __( 'Resume Generating', 'webp-generator' ),
-			'paused'                       => __( 'Paused. Click "Resume Generating" to pick up where this left off.', 'webp-generator' ),
-			'vsOriginal'                   => __( 'vs.', 'webp-generator' ),
-			// Region 3's stats-tile label, built client-side in admin.js
-			// (renderBytesTiles()): 'newSizeVsOriginals' on a server
-			// producing only one format (matches this page's original,
-			// unlabelled single-format wording exactly); 'vsOriginals'
-			// (no "New size" prefix -- a format badge sits in front of it
-			// instead) once more than one format is active, one tile per
-			// format.
-			'newSizeVsOriginals'           => __( 'New size vs. originals', 'webp-generator' ),
-			'vsOriginals'                  => __( 'vs. originals', 'webp-generator' ),
-			'folders'                      => __( 'folders', 'webp-generator' ),
-			'images'                       => __( 'images', 'webp-generator' ),
-			'viewResults'                  => __( 'View results →', 'webp-generator' ),
-			'error'                        => __( 'Something went wrong:', 'webp-generator' ),
+			'cacheClearedPast'            => __( 'The page cache was also cleared as part of that run.', 'webp-generator' ),
+			'resumeGenerating'            => __( 'Resume Generating', 'webp-generator' ),
+			'paused'                      => __( 'Paused. Click "Resume Generating" to pick up where this left off.', 'webp-generator' ),
+			'folders'                     => __( 'folders', 'webp-generator' ),
+			'images'                      => __( 'images', 'webp-generator' ),
+			'viewResults'                 => __( 'View results →', 'webp-generator' ),
+			'error'                       => __( 'Something went wrong:', 'webp-generator' ),
+
+			// Settings card: shown next to the format rows while
+			// wireSettingsAutosave() (admin.js) saves a checkbox/quality
+			// change -- there's no Save button anymore, so this is the
+			// only feedback that anything happened at all.
+			'savingSettings'              => __( 'Saving…', 'webp-generator' ),
+			'settingsSaved'               => __( 'Saved.', 'webp-generator' ),
+			'settingsSaveFailed'          => __( "Couldn't save. Try again.", 'webp-generator' ),
 
 			// Per-row "next best action" on a Failed conversions entry --
 			// see WWG_Attachment_Resolver/WWG_Admin::classify_failure() for
 			// how a file ends up in one of these buckets.
-			'fixThisFile'                  => __( 'Fix this file', 'webp-generator' ),
-			'fixing'                       => __( 'Fixing…', 'webp-generator' ),
-			'deleteInstead'                => __( 'Delete instead', 'webp-generator' ),
-			'deleteThisFile'               => __( 'Delete this file', 'webp-generator' ),
-			'deleting'                     => __( 'Deleting…', 'webp-generator' ),
-			'viewInMediaLibrary'           => __( 'View in Media Library →', 'webp-generator' ),
-			'confirmDeleteDerivative'      => __( 'Delete this file instead of fixing it? This permanently removes the broken image size. Nothing will recreate it automatically unless you click Generate again.', 'webp-generator' ),
-			'confirmDeleteOnly'            => __( 'Permanently delete this corrupted file? It can’t be recovered afterward.', 'webp-generator' ),
-			'confirmDeleteOriginal'        => __( 'This is the original image, not a generated size — deleting it removes the entire attachment (the original and every generated size) permanently, and can’t be undone. Delete it anyway?', 'webp-generator' ),
-			'originalNote'                 => __( 'This is the original image, not a generated size.', 'webp-generator' ),
-			'fixedMessage'                 => __( 'Fixed — regenerated from the original.', 'webp-generator' ),
-			'deletedMessage'               => __( 'Deleted.', 'webp-generator' ),
-			'actionFailedMessage'          => __( 'That didn’t work. Check your server’s error log, or try again.', 'webp-generator' ),
+			'fixThisFile'                 => __( 'Fix this file', 'webp-generator' ),
+			'fixing'                      => __( 'Fixing…', 'webp-generator' ),
+			'deleteInstead'               => __( 'Delete instead', 'webp-generator' ),
+			'deleteThisFile'              => __( 'Delete this file', 'webp-generator' ),
+			'deleting'                    => __( 'Deleting…', 'webp-generator' ),
+			'viewInMediaLibrary'          => __( 'View in Media Library →', 'webp-generator' ),
+			'confirmDeleteDerivative'     => __( 'Delete this file instead of fixing it? This permanently removes the broken image size. Nothing will recreate it automatically unless you click Generate again.', 'webp-generator' ),
+			'confirmDeleteOnly'           => __( 'Permanently delete this corrupted file? It can’t be recovered afterward.', 'webp-generator' ),
+			'confirmDeleteOriginal'       => __( 'This is the original image, not a generated size — deleting it removes the entire attachment (the original and every generated size) permanently, and can’t be undone. Delete it anyway?', 'webp-generator' ),
+			'originalNote'                => __( 'This is the original image, not a generated size.', 'webp-generator' ),
+			'fixedMessage'                => __( 'Fixed — regenerated from the original.', 'webp-generator' ),
+			'deletedMessage'              => __( 'Deleted.', 'webp-generator' ),
+			'actionFailedMessage'         => __( 'That didn’t work. Check your server’s error log, or try again.', 'webp-generator' ),
 		);
 	}
 
@@ -525,12 +614,30 @@ class WWG_Admin {
 
 		foreach ( WWG_Format::all() as $id => $def ) {
 			$readiness['formats'][ $id ] = array(
-				'id'          => $id,
-				'label'       => $def['label'],
-				'supported'   => WWG_Format::has_support( $id ),
-				'enabled'     => in_array( $id, $enabled, true ),
-				'quality'     => $this->generator->get_quality( $id ),
-				'option_name' => $def['quality_option'],
+				'id'              => $id,
+				'label'           => $def['label'],
+				'supported'       => WWG_Format::has_support( $id ),
+				'enabled'         => in_array( $id, $enabled, true ),
+				// Distinct from 'enabled' above once a Settings checkbox
+				// exists: 'enabled' is the final answer after every gate
+				// (server support, the site owner's own choice, AND a
+				// developer's wwg_enabled_formats filter); this is just
+				// the site owner's own checkbox, in isolation. The two
+				// can disagree -- a supported, checked-on format the dev
+				// filter is still overriding -- and the view needs to
+				// tell that case apart from "the owner just unchecked
+				// it" to know whether the "turned off by a customization"
+				// notice still applies.
+				'user_wants'      => WWG_Format::user_wants( $id ),
+				'enabled_option'  => $def['enabled_option'],
+				'quality'         => $this->generator->get_quality( $id ),
+				'option_name'     => $def['quality_option'],
+				// Not necessarily the same across formats -- see
+				// WWG_Format::DEFAULT_QUALITY_AVIF's own docblock for why
+				// -- so the Settings field below can't hardcode one
+				// number for both.
+				'default_quality' => $def['default_quality'],
+				'quality_guide'   => $this->quality_guide_for( $id ),
 			);
 		}
 
@@ -538,94 +645,105 @@ class WWG_Admin {
 	}
 
 	/**
-	 * AJAX handler for the scan pass only -- Generate/convert runs as a
-	 * WP-Cron background job now (see WWG_Job::run_tick(), which reaches
-	 * the same process_batch() through run_job_batch() below), not
-	 * through this endpoint. Scan stays client-driven: it's just
-	 * file_exists() calls, fast and bounded enough that babysitting a tab
-	 * for it was never the problem this plugin needed to solve.
+	 * Per-format "for this kind of image, use this range" guidance shown
+	 * under the Settings quality slider -- not this plugin's own
+	 * invention: synthesized from published quality-mapping research
+	 * (e.g. a direct JPEG/AVIF/WebP equivalence comparison at
+	 * https://www.industrialempathy.com/posts/avif-webp-quality-settings/,
+	 * and corroborating ranges from general web-performance guidance)
+	 * rather than picked arbitrarily. Deliberately lives here, not in
+	 * WWG_Format -- that class is scoped to technical per-format facts
+	 * (extension, mime, encoder identifiers, quality option), not UI copy.
 	 *
-	 * Processes one bounded batch of files from one folder under the
-	 * uploads directory and reports back a cursor to resume from, so the
-	 * client can loop this until done without any single request risking
-	 * a timeout.
+	 * AVIF's tiers run a few points higher than WebP's at the top end
+	 * (matching the two formats' own already-different defaults, see
+	 * WWG_Format::DEFAULT_QUALITY_AVIF's docblock) because the two
+	 * formats aren't on a perceptually equivalent scale at the same
+	 * number. The lower two tiers are kept identical across formats: at
+	 * low quality settings the gap between formats matters far less than
+	 * at the top end, where most of a site's real photography actually
+	 * lives.
+	 *
+	 * @param string $format_id One of WWG_Format::WEBP/WWG_Format::AVIF.
+	 * @return array[] {label, range} pairs, low quality to high.
 	 */
-	public function handle_ajax() {
-		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
+	private function quality_guide_for( $format_id ) {
+		$top_tier_range = WWG_Format::AVIF === $format_id ? '80-90' : '75-90';
 
-		if ( ! current_user_can( self::CAPABILITY ) ) {
-			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
-		}
-
-		$dir_index   = isset( $_POST['dir_index'] ) ? absint( $_POST['dir_index'] ) : 0;
-		$file_offset = isset( $_POST['file_offset'] ) ? absint( $_POST['file_offset'] ) : 0;
-
-		$dirs   = $this->get_scan_directories();
-		$result = $this->process_batch( $dirs, $dir_index, $file_offset, 'scan' );
-
-		wp_send_json_success(
+		return array(
 			array(
-				'done'        => $result['done'],
-				'dir'         => $result['dir'],
-				'dir_index'   => $result['dir_index'],
-				'file_offset' => $result['file_offset'],
-				'total_dirs'  => count( $dirs ),
-				'stats'       => $result['stats'],
-			)
+				'label' => __( 'Background or decorative images', 'webp-generator' ),
+				'range' => '50-60',
+			),
+			array(
+				'label' => __( 'Thumbnails and previews', 'webp-generator' ),
+				'range' => '60-70',
+			),
+			array(
+				'label' => __( 'Website photography, including hero/feature images', 'webp-generator' ),
+				'range' => $top_tier_range,
+			),
 		);
 	}
 
 	/**
-	 * AJAX: persist the final tally from a completed client-driven Scan
-	 * pass, so the tool page's "Library Status" region can survive a
-	 * reload the same way Generate's own results already do (see
-	 * OPTION_SCAN_STATE). Fired once by admin.js's finishScan(), not
-	 * per-batch -- entirely separate from handle_ajax()/process_batch()'s
-	 * per-batch request/response shape above, which this doesn't touch.
+	 * Persists a completed counting pass's tally as the "Library Status"
+	 * snapshot, so Region 1 survives a reload the same way Generate's own
+	 * results already do (see OPTION_SCAN_STATE). Called directly by
+	 * WWG_Job::process_one_batch() the moment its own counting phase
+	 * finishes walking the tree -- an in-process call, not AJAX, since
+	 * that phase already runs server-side as part of the same Generate
+	 * job (see run_job_batch()'s 'scan' mode). $stats is trusted input
+	 * here (process_batch()'s own accumulated output), unlike the old
+	 * client-driven Scan flow this replaces, which had to sanitize
+	 * everything as untrusted $_POST.
+	 *
+	 * @param array $stats {
+	 *     @type int   $missing              Missing (file, format) pairs.
+	 *     @type int   $missing_files        Distinct files missing something.
+	 *     @type int   $original_bytes       Total bytes of files missing something.
+	 *     @type int   $scanned              Whole-library image count (every
+	 *                                       file this counting pass visited
+	 *                                       or had remembered via
+	 *                                       OPTION_CLEAN_DIRS) -- persisted
+	 *                                       as `total_images` below.
+	 *     @type int   $original_bytes_total Whole-library original size,
+	 *                                       regardless of which formats
+	 *                                       are enabled -- the "Original"
+	 *                                       row of Library Status's table.
+	 *     @type int   $webp_bytes           Whole-library current .webp size.
+	 *     @type int   $avif_bytes           Whole-library current .avif size.
+	 *     @type int   $webp_original_bytes  Those same files' original size.
+	 *     @type int   $avif_original_bytes  Those same files' original size.
+	 *     @type int   $webp_present         How many images currently have
+	 *                                       a .webp version.
+	 *     @type int   $avif_present         How many images currently have
+	 *                                       an .avif version.
+	 *     @type array $failures             Known permanent per-file failures.
+	 * }
+	 * @return array The state actually persisted.
 	 */
-	public function handle_save_scan_result() {
-		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
-
-		if ( ! current_user_can( self::CAPABILITY ) ) {
-			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
-		}
-
-		$failures = array();
-		if ( isset( $_POST['failures'] ) ) {
-			// wp_unslash() first -- WordPress adds slashes to all $_POST
-			// data, and json_decode() on a slashed string silently fails
-			// on any value containing a quote (exactly what a real decode
-			// error message is often full of).
-			$decoded = json_decode( wp_unslash( $_POST['failures'] ), true );
-			if ( is_array( $decoded ) ) {
-				// Capped the same way WWG_Job's own accumulated failures
-				// are -- this is a client-reported list, not to be trusted
-				// for length any more than for content.
-				foreach ( array_slice( $decoded, -500 ) as $failure ) {
-					if ( isset( $failure['file'], $failure['error'] ) && is_string( $failure['file'] ) && is_string( $failure['error'] ) ) {
-						$format     = isset( $failure['format'] ) && is_string( $failure['format'] ) ? sanitize_key( $failure['format'] ) : WWG_Format::WEBP;
-						$failures[] = array(
-							'file'   => sanitize_text_field( $failure['file'] ),
-							'format' => $format,
-							'error'  => sanitize_text_field( $failure['error'] ),
-						);
-					}
-				}
-			}
-		}
-
+	public function save_scan_state( array $stats ) {
 		$state = array(
-			'missing'        => isset( $_POST['missing'] ) ? absint( $_POST['missing'] ) : 0,
-			'missing_files'  => isset( $_POST['missing_files'] ) ? absint( $_POST['missing_files'] ) : 0,
-			'original_bytes' => isset( $_POST['original_bytes'] ) ? absint( $_POST['original_bytes'] ) : 0,
-			'failures'       => $failures,
-			'finished_at'    => time(), // Server clock -- never trust a client-sent timestamp.
-			'invalidated_at' => null,   // A scan that just finished is, by definition, not stale.
+			'missing'              => isset( $stats['missing'] ) ? absint( $stats['missing'] ) : 0,
+			'missing_files'        => isset( $stats['missing_files'] ) ? absint( $stats['missing_files'] ) : 0,
+			'original_bytes'       => isset( $stats['original_bytes'] ) ? absint( $stats['original_bytes'] ) : 0,
+			'total_images'         => isset( $stats['scanned'] ) ? absint( $stats['scanned'] ) : 0,
+			'original_bytes_total' => isset( $stats['original_bytes_total'] ) ? absint( $stats['original_bytes_total'] ) : 0,
+			'webp_bytes'           => isset( $stats['webp_bytes'] ) ? absint( $stats['webp_bytes'] ) : 0,
+			'avif_bytes'           => isset( $stats['avif_bytes'] ) ? absint( $stats['avif_bytes'] ) : 0,
+			'webp_original_bytes'  => isset( $stats['webp_original_bytes'] ) ? absint( $stats['webp_original_bytes'] ) : 0,
+			'avif_original_bytes'  => isset( $stats['avif_original_bytes'] ) ? absint( $stats['avif_original_bytes'] ) : 0,
+			'webp_present'         => isset( $stats['webp_present'] ) ? absint( $stats['webp_present'] ) : 0,
+			'avif_present'         => isset( $stats['avif_present'] ) ? absint( $stats['avif_present'] ) : 0,
+			'failures'             => isset( $stats['failures'] ) && is_array( $stats['failures'] ) ? $stats['failures'] : array(),
+			'finished_at'          => time(), // Server clock -- never trust a client-sent timestamp.
+			'invalidated_at'       => null,   // A count that just finished is, by definition, not stale.
 		);
 
 		update_option( self::OPTION_SCAN_STATE, $state, false );
 
-		wp_send_json_success( $state );
+		return $state;
 	}
 
 	/**
@@ -633,18 +751,31 @@ class WWG_Admin {
 	 * pass, read fresh on every page load so the tool page can hydrate
 	 * Region 1 the same way WWG_Job::get_hydrated_state() already lets it
 	 * hydrate Generate's own results. See OPTION_SCAN_STATE's docblock
-	 * for the shape and self-invalidation rationale.
+	 * for the shape and self-invalidation rationale. Public (not just
+	 * used by render_page() below): WWG_Job::process_one_batch() also
+	 * reads this directly, as a fallback for a poll that lands on the
+	 * job *after* it's already finished via a different process
+	 * entirely (WP-Cron's own tick, racing this one) -- see its own
+	 * call site for why that fallback matters.
 	 *
 	 * @return array
 	 */
-	private function get_scan_state() {
+	public function get_scan_state() {
 		$defaults = array(
-			'missing'        => 0,
-			'missing_files'  => 0,
-			'original_bytes' => 0,
-			'failures'       => array(),
-			'finished_at'    => 0,
-			'invalidated_at' => null,
+			'missing'              => 0,
+			'missing_files'        => 0,
+			'original_bytes'       => 0,
+			'total_images'         => 0,
+			'original_bytes_total' => 0,
+			'webp_bytes'           => 0,
+			'avif_bytes'           => 0,
+			'webp_original_bytes'  => 0,
+			'avif_original_bytes'  => 0,
+			'webp_present'         => 0,
+			'avif_present'         => 0,
+			'failures'             => array(),
+			'finished_at'          => 0,
+			'invalidated_at'       => null,
 		);
 
 		$state = get_option( self::OPTION_SCAN_STATE, array() );
@@ -1226,10 +1357,15 @@ class WWG_Admin {
 	 * per-site setting (Settings > Media > "Organize my uploads into
 	 * month- and year-based folders") that can be off, leaving uploads
 	 * flat, and other plugins routinely create their own subfolders under
-	 * uploads/ regardless of that setting. A plain recursive walk covers
-	 * all of it without hardcoding any site's particular structure.
+	 * uploads/ regardless of that setting. collect_subdirectories() below
+	 * covers all of it without hardcoding any site's particular structure.
 	 *
-	 * Cached briefly since it's recomputed on every AJAX step.
+	 * Cached (see collect_subdirectories()'s own docblock for why this can
+	 * safely be long-lived) since it's otherwise recomputed on every AJAX
+	 * step -- a fresh cache miss right when a Generate run starts is
+	 * exactly what used to leave the client's "Starting…" state sitting
+	 * for several real seconds on a large library, before this method's
+	 * own rewrite away from a per-file iterator (see below).
 	 *
 	 * @return string[] Relative paths (e.g. "2019/03", "2019", or ""
 	 *                   for the uploads root itself), sorted.
@@ -1246,23 +1382,7 @@ class WWG_Admin {
 		$dirs       = array( '' );
 
 		if ( is_dir( $base ) ) {
-			$flags    = FilesystemIterator::SKIP_DOTS | FilesystemIterator::UNIX_PATHS;
-			$iterator = new RecursiveIteratorIterator(
-				new RecursiveDirectoryIterator( $base, $flags ),
-				RecursiveIteratorIterator::SELF_FIRST
-			);
-			// Depth cap as a safety net against runaway/circular directory
-			// structures (e.g. a symlink loop) on servers where that isn't
-			// otherwise guarded against -- 10 levels is far deeper than
-			// any real uploads layout needs.
-			$iterator->setMaxDepth( 10 );
-
-			foreach ( $iterator as $file_info ) {
-				if ( ! $file_info->isDir() || $file_info->isLink() ) {
-					continue;
-				}
-				$dirs[] = ltrim( str_replace( $base, '', $file_info->getPathname() ), '/' );
-			}
+			$this->collect_subdirectories( $base, '', $dirs, 0 );
 		}
 
 		/**
@@ -1279,9 +1399,67 @@ class WWG_Admin {
 		$dirs = apply_filters( 'wwg_scan_directories', $dirs );
 
 		sort( $dirs );
-		set_transient( $cache_key, $dirs, 15 * MINUTE_IN_SECONDS );
+		// An hour, not the 15 minutes this used to be -- safe to leave
+		// this long-lived because the common way this list actually goes
+		// stale (a new upload creating a fresh "YYYY/MM" folder) already
+		// invalidates it proactively and immediately (see
+		// WWG_Generator::generate_siblings()'s own delete_transient()
+		// call), so the TTL only exists as a safety net for a folder
+		// appearing some other way (a migration script, another plugin
+		// writing directly into uploads/) -- self-healing within the hour
+		// either way, just without paying this walk's cost on every
+		// expiry in between.
+		set_transient( $cache_key, $dirs, HOUR_IN_SECONDS );
 
 		return $dirs;
+	}
+
+	/**
+	 * Recursively collects every subdirectory under $abs_dir into $dirs,
+	 * as paths relative to $base -- glob()'s GLOB_ONLYDIR, not the
+	 * RecursiveDirectoryIterator/RecursiveIteratorIterator pair this
+	 * replaced. Real-world difference confirmed live: that iterator
+	 * visits every FILE too, not just directories (SELF_FIRST traversal
+	 * has to inspect each entry's isDir() to rule it out), so on a
+	 * library with hundreds of thousands of images sitting in a handful
+	 * of leaf "YYYY/MM" folders, get_scan_directories() was stepping
+	 * through the entire library in PHP userland just to find ~200
+	 * directory names -- measured at several real seconds on a ~194k-
+	 * image library the moment this method's own 15-minute cache (see
+	 * get_scan_directories()) expired, which is exactly the stretch a
+	 * fresh Generate click has nothing else to show the visitor yet (see
+	 * 'startingLabel' in get_strings()). glob() does its directory-vs-file
+	 * filtering natively rather than exposing every file to a PHP-level
+	 * loop, so this scales with the number of FOLDERS instead.
+	 *
+	 * @param string $abs_dir Absolute path to search.
+	 * @param string $rel_dir That path's own already-known relative path
+	 *                        ('' for $base itself).
+	 * @param array  $dirs    Accumulator, appended to by reference.
+	 * @param int    $depth   Recursion guard -- same 10-level cap the
+	 *                        iterator this replaced already enforced, as
+	 *                        a safety net against a runaway/circular
+	 *                        structure (e.g. a symlink loop) on a server
+	 *                        where nothing else guards against one.
+	 */
+	private function collect_subdirectories( $abs_dir, $rel_dir, array &$dirs, $depth ) {
+		if ( $depth >= 10 ) {
+			return;
+		}
+
+		$children = glob( $abs_dir . '/*', GLOB_ONLYDIR );
+		if ( empty( $children ) ) {
+			return;
+		}
+
+		foreach ( $children as $child ) {
+			if ( is_link( $child ) ) {
+				continue; // Same symlink-loop guard the iterator this replaced had.
+			}
+			$child_rel = '' === $rel_dir ? basename( $child ) : $rel_dir . '/' . basename( $child );
+			$dirs[]    = $child_rel;
+			$this->collect_subdirectories( $child, $child_rel, $dirs, $depth + 1 );
+		}
 	}
 
 	/**
@@ -1325,12 +1503,19 @@ class WWG_Admin {
 	 * @param string   $abs_dir Absolute folder path, stat'd only if
 	 *                          there's a cache entry to validate.
 	 * @param string[] $formats Currently-enabled format ids (WWG_Format::enabled()).
-	 * @return array|false False if not cached, or since invalidated.
-	 *                      Otherwise the (possibly empty) list of
-	 *                      {file, format} pairs this folder's clean
-	 *                      status depends on -- the caller still needs to
-	 *                      report those every run, just without re-
-	 *                      walking the rest of the folder to find them.
+	 * @return array|false False if not cached, or since invalidated (or
+	 *                      predates whole-library totals -- see the
+	 *                      `totals` check below). Otherwise
+	 *                      {known_failures, totals}: known_failures is
+	 *                      the (possibly empty) list of {file, format}
+	 *                      pairs this folder's clean status depends on --
+	 *                      the caller still needs to report those every
+	 *                      run, just without re-walking the rest of the
+	 *                      folder to find them; totals is this folder's
+	 *                      own remembered {scanned, webp_bytes,
+	 *                      avif_bytes, webp_original_bytes,
+	 *                      avif_original_bytes} contribution (see
+	 *                      OPTION_CLEAN_DIRS's own docblock).
 	 */
 	private function is_known_clean( $dir_rel, $abs_dir, array $formats ) {
 		$clean_dirs = get_option( self::OPTION_CLEAN_DIRS, array() );
@@ -1356,6 +1541,7 @@ class WWG_Admin {
 		$mtime          = is_array( $entry ) ? $entry['mtime'] : $entry;
 		$cached_formats = is_array( $entry ) && ! empty( $entry['formats'] ) ? $entry['formats'] : array( WWG_Format::WEBP );
 		$known_failures = is_array( $entry ) && ! empty( $entry['known_failures'] ) ? $entry['known_failures'] : array();
+		$totals         = is_array( $entry ) && ! empty( $entry['totals'] ) ? $entry['totals'] : null;
 
 		// A format enabled now that wasn't accounted for when this folder
 		// was last verified clean (this server only just gained AVIF
@@ -1365,6 +1551,23 @@ class WWG_Admin {
 		// contents changed -- force a real recheck rather than silently
 		// never generating the new format for anything already cached.
 		if ( array_diff( $formats, $cached_formats ) ) {
+			return false;
+		}
+
+		// An entry cached before whole-library totals existed at all has
+		// no `totals` key; one cached after that but before the
+		// Original/WebP/AVIF table's own *_present counts existed has a
+		// `totals` missing just those two -- either way, rather than
+		// silently contributing an incomplete (or zero) total to Library
+		// Status forever, treat both like the format-staleness case
+		// above: force one real walk, which backfills the full current
+		// shape via mark_known_clean() the moment it finishes. Checking
+		// one representative newest field ('webp_present') rather than
+		// every key individually -- mark_known_clean() only ever writes
+		// this whole array as one literal, so any entry that has this
+		// key has every other current key too. Every check after that is
+		// a true, fully-accurate hit.
+		if ( null === $totals || ! isset( $totals['webp_present'] ) ) {
 			return false;
 		}
 
@@ -1396,7 +1599,10 @@ class WWG_Admin {
 			}
 		}
 
-		return $normalized;
+		return array(
+			'known_failures' => $normalized,
+			'totals'         => $totals,
+		);
 	}
 
 	/**
@@ -1418,8 +1624,20 @@ class WWG_Admin {
 	 *                                reconfirmed stable this same pass,
 	 *                                not freshly discovered) this folder's
 	 *                                clean status depends on.
+	 * @param array    $totals         This folder's own {scanned,
+	 *                                original_bytes_total, webp_bytes,
+	 *                                avif_bytes, webp_original_bytes,
+	 *                                avif_original_bytes, webp_present,
+	 *                                avif_present} contribution --
+	 *                                exactly the relevant slice of
+	 *                                process_batch()'s own $stats, which
+	 *                                is always scoped to just this one
+	 *                                folder for the single call that
+	 *                                triggers $became_clean. See
+	 *                                OPTION_CLEAN_DIRS's own docblock for
+	 *                                why this is remembered at all.
 	 */
-	private function mark_known_clean( $dir_rel, $abs_dir, array $formats, array $known_failures = array() ) {
+	private function mark_known_clean( $dir_rel, $abs_dir, array $formats, array $known_failures = array(), array $totals = array() ) {
 		if ( ! is_dir( $abs_dir ) ) {
 			// Vanished between the file listing and here (rare race) --
 			// nothing meaningful to fingerprint.
@@ -1439,6 +1657,19 @@ class WWG_Admin {
 		if ( $known_failures ) {
 			$entry['known_failures'] = array_values( $known_failures );
 		}
+		// Defensive isset() fallbacks, not a bare pass-through -- keeps
+		// this method's own contract self-contained rather than trusting
+		// its one caller to always supply every key.
+		$entry['totals']        = array(
+			'scanned'              => isset( $totals['scanned'] ) ? $totals['scanned'] : 0,
+			'original_bytes_total' => isset( $totals['original_bytes_total'] ) ? $totals['original_bytes_total'] : 0,
+			'webp_bytes'           => isset( $totals['webp_bytes'] ) ? $totals['webp_bytes'] : 0,
+			'avif_bytes'           => isset( $totals['avif_bytes'] ) ? $totals['avif_bytes'] : 0,
+			'webp_original_bytes'  => isset( $totals['webp_original_bytes'] ) ? $totals['webp_original_bytes'] : 0,
+			'avif_original_bytes'  => isset( $totals['avif_original_bytes'] ) ? $totals['avif_original_bytes'] : 0,
+			'webp_present'         => isset( $totals['webp_present'] ) ? $totals['webp_present'] : 0,
+			'avif_present'         => isset( $totals['avif_present'] ) ? $totals['avif_present'] : 0,
+		);
 		$clean_dirs[ $dir_rel ] = $entry;
 		update_option( self::OPTION_CLEAN_DIRS, $clean_dirs, false );
 	}
@@ -1594,21 +1825,53 @@ class WWG_Admin {
 	 */
 	private function process_batch( $dirs, $dir_index, $file_offset, $mode ) {
 		$stats = array(
-			'scanned'        => 0,
+			'scanned'              => 0,
 			// Distinct files needing >=1 enabled format -- the headline
 			// sentence's count.
-			'missing_files'  => 0,
+			'missing_files'        => 0,
 			// (file, format) conversion units still needed -- the
 			// progress bar's currency; a file needing both WebP and AVIF
 			// counts once in missing_files but twice here.
-			'missing'        => 0,
-			'converted'      => 0,
-			'failed'         => 0,
-			'original_bytes' => 0,
-			'webp_bytes'     => 0,
-			'avif_bytes'     => 0,
-			'failures'       => array(),
-			'recoveries'     => array(),
+			'missing'              => 0,
+			'converted'            => 0,
+			'failed'               => 0,
+			'original_bytes'       => 0,
+			// The whole library's own original size, once per file
+			// regardless of which formats happen to be enabled --
+			// Library Status's "Original" table row reads from this, not
+			// from either format's own *_original_bytes below (those stay
+			// 0 for a format that isn't currently enabled at all).
+			'original_bytes_total' => 0,
+			// Per-format "X vs. originals" stat-tile figures. Deliberately
+			// NOT gated on this run actually needing to convert anything:
+			// webp_bytes/avif_bytes is the CURRENT total size of every
+			// format file for every source file this run has visited so
+			// far, whether that format file already existed coming in or
+			// was just created just now, and webp_original_bytes/
+			// avif_original_bytes is those same visited files' total
+			// original size, regardless of which formats they happened to
+			// need. A format that's already fully caught up therefore
+			// still climbs both figures together, in real time, as the
+			// tree is walked -- reading as "keeping pace" rather than
+			// either a fabricated instant "Done" claim or a numerator
+			// stuck at 0 against a denominator that keeps growing without
+			// it (the two bad alternatives this replaced).
+			'webp_bytes'           => 0,
+			'avif_bytes'           => 0,
+			'webp_original_bytes'  => 0,
+			'avif_original_bytes'  => 0,
+			// Companion to *_bytes above, but a plain file COUNT (not a
+			// byte size) -- how many source files currently have that
+			// format's derivative on disk, incremented in lockstep with
+			// *_bytes everywhere it's incremented (the initial exists()
+			// check, and both convert-outcome branches below). Library
+			// Status's own table needs this directly -- *_bytes alone
+			// can't tell "fewer, larger files" apart from "many, smaller
+			// files".
+			'webp_present'         => 0,
+			'avif_present'         => 0,
+			'failures'             => array(),
+			'recoveries'           => array(),
 		);
 
 		if ( $dir_index >= count( $dirs ) ) {
@@ -1643,8 +1906,8 @@ class WWG_Admin {
 			? $upload_dir['basedir']
 			: trailingslashit( $upload_dir['basedir'] ) . $dir_rel;
 
-		$cached_known_failures = $this->is_known_clean( $dir_rel, $abs_dir, $formats );
-		if ( false !== $cached_known_failures ) {
+		$cache_hit = $this->is_known_clean( $dir_rel, $abs_dir, $formats );
+		if ( false !== $cache_hit ) {
 			// The folder itself isn't walked -- that's the whole point --
 			// but any known failures it depends on must still be reported
 			// every run, same as if we'd found them the slow way (see
@@ -1652,7 +1915,7 @@ class WWG_Admin {
 			// out of view). is_known_clean() already cheaply re-validated
 			// each of these still matches its remembered fingerprint.
 			$counted_files = array();
-			foreach ( $cached_known_failures as $item ) {
+			foreach ( $cache_hit['known_failures'] as $item ) {
 				$file_rel = $item['file'];
 				$format   = $item['format'];
 				if ( ! in_array( $format, $formats, true ) ) {
@@ -1669,11 +1932,22 @@ class WWG_Admin {
 					++$stats['missing_files'];
 					$stats['original_bytes'] += $entry['size'];
 				}
-				$stats['failures'][] = array(
+				$stats[ $format . '_original_bytes' ] += $entry['size'];
+				$stats['failures'][]                   = array(
 					'file'   => $file_rel,
 					'format' => $format,
 					'error'  => $entry['error'],
 				);
+			}
+
+			// The clean majority of this folder was never re-walked --
+			// add back its own remembered totals (see mark_known_clean())
+			// so this pass's whole-library figures (Library Status's own
+			// numbers) still include it, instead of silently excluding
+			// every cache-skipped folder -- see OPTION_CLEAN_DIRS's own
+			// docblock for why these are safe to just sum in.
+			foreach ( $cache_hit['totals'] as $key => $value ) {
+				$stats[ $key ] += $value;
 			}
 
 			return array(
@@ -1706,17 +1980,32 @@ class WWG_Admin {
 			$source_path = $abs_dir . '/' . $filename;
 			$file_rel    = '' === $dir_rel ? $filename : $dir_rel . '/' . $filename;
 
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish or become unreadable between the directory listing above and this stat() call; (int) cast already turns a false return into a harmless 0.
+			$source_bytes                   = (int) @filesize( $source_path );
+			$stats['original_bytes_total'] += $source_bytes; // every file visited, regardless of enabled formats -- see this key's own docblock above.
+
 			// Belt-and-suspenders, both modes, per format: a derived file
 			// may have appeared some other way (manual upload, another
 			// tool) since a failure was last remembered for it -- checked
 			// before the known-failure shortcut so a stale record can
 			// never mask a file that's already actually fine, regardless
-			// of which mode happens to notice first.
+			// of which mode happens to notice first. Also doubles as this
+			// run's live "X vs. originals" stat-tile tally (see the $stats
+			// array's own docblock): every file actually visited here --
+			// not just ones with something missing -- feeds its original
+			// size into webp_original_bytes/avif_original_bytes, and a
+			// format already sitting on disk feeds its current size into
+			// webp_bytes/avif_bytes right here, in the same pass that just
+			// confirmed it exists.
 			$missing_formats = array();
 			foreach ( $formats as $format ) {
-				$target = WWG_Format::path_for( $format, $source_path );
+				$target                                = WWG_Format::path_for( $format, $source_path );
+				$stats[ $format . '_original_bytes' ] += $source_bytes;
 				if ( $target && file_exists( $target ) ) {
 					$this->forget_failure( $file_rel, $format );
+					// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- same race as $source_bytes above; (int) cast turns a false return into a harmless 0.
+					$stats[ $format . '_bytes' ] += (int) @filesize( $target );
+					++$stats[ $format . '_present' ];
 				} else {
 					$missing_formats[] = $format;
 				}
@@ -1728,8 +2017,7 @@ class WWG_Admin {
 			}
 
 			++$stats['missing_files'];
-			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish or become unreadable between the directory listing above and this stat() call; (int) cast already turns a false return into a harmless 0.
-			$stats['original_bytes'] += (int) @filesize( $source_path );
+			$stats['original_bytes'] += $source_bytes;
 
 			// Known-failure shortcut, both modes, per format: cheap (a
 			// stat, not a decode), and reported identically in either
@@ -1787,8 +2075,13 @@ class WWG_Admin {
 						// file_exists() check above just confirmed this
 						// format was missing -- but a race (something
 						// else creating it in between) is possible; treat
-						// it the same as that check would have.
+						// it the same as that check would have, including
+						// feeding its size into the "X vs. originals"
+						// tile's numerator the same as the exists-check
+						// loop above would have if it had won the race.
 						$this->forget_failure( $file_rel, $format );
+						$stats[ $format . '_bytes' ] += $outcome['bytes'];
+						++$stats[ $format . '_present' ];
 						continue;
 					}
 
@@ -1797,6 +2090,7 @@ class WWG_Admin {
 					if ( 'created' === $outcome['status'] ) {
 						++$stats['converted'];
 						$stats[ $format . '_bytes' ] += $outcome['bytes'];
+						++$stats[ $format . '_present' ];
 						$this->forget_failure( $file_rel, $format ); // Covers recovered successes too.
 						if ( ! empty( $outcome['recovered'] ) ) {
 							$stats['recoveries'][] = array(
@@ -1851,7 +2145,26 @@ class WWG_Admin {
 		$became_clean = ( 0 === $file_offset ) && $dir_done
 			&& ( $stats['missing'] === $stats['converted'] + count( $stable_known_failures ) );
 		if ( $became_clean ) {
-			$this->mark_known_clean( $dir_rel, $abs_dir, $formats, $stable_known_failures );
+			// $stats is scoped to just this one folder for this one call
+			// (fresh at the top of process_batch(), never accumulated
+			// across directories) -- exactly what mark_known_clean()
+			// needs to remember as this folder's own contribution.
+			$this->mark_known_clean(
+				$dir_rel,
+				$abs_dir,
+				$formats,
+				$stable_known_failures,
+				array(
+					'scanned'              => $stats['scanned'],
+					'original_bytes_total' => $stats['original_bytes_total'],
+					'webp_bytes'           => $stats['webp_bytes'],
+					'avif_bytes'           => $stats['avif_bytes'],
+					'webp_original_bytes'  => $stats['webp_original_bytes'],
+					'avif_original_bytes'  => $stats['avif_original_bytes'],
+					'webp_present'         => $stats['webp_present'],
+					'avif_present'         => $stats['avif_present'],
+				)
+			);
 		}
 
 		return array(
@@ -1862,5 +2175,300 @@ class WWG_Admin {
 			'done'        => false,
 			'skipped'     => false,
 		);
+	}
+
+	// ---- Media Library list-view "WebP/AVIF" column ----
+	//
+	// Deliberately not sortable, and nothing here is persisted -- every
+	// row's status is recomputed live, the same handful of file_exists()/
+	// filesize() checks the rest of this class already treats as cheap
+	// enough to run on every render (see classify_failure()'s own
+	// docblock for the identical reasoning). Sorting would need a real,
+	// permanent per-attachment record kept in sync on every conversion/
+	// fix/delete -- nothing in this plugin has ever needed that, and nor
+	// does simply reporting a fresh answer per page load.
+
+	/**
+	 * @param array $columns Existing Media Library list-table columns.
+	 * @return array
+	 */
+	public function add_compression_column( $columns ) {
+		$columns['wwg_compression'] = __( 'WebP/AVIF', 'webp-generator' );
+		return $columns;
+	}
+
+	/**
+	 * @param string $column_name The column being rendered -- fires for
+	 *                             every custom column, not just ours.
+	 * @param int    $post_id     Attachment ID.
+	 */
+	public function render_compression_column( $column_name, $post_id ) {
+		if ( 'wwg_compression' !== $column_name ) {
+			return;
+		}
+
+		$summary = $this->compression_summary_for_attachment( (int) $post_id );
+
+		if ( 'converted' === $summary['status'] || 'partial' === $summary['status'] ) {
+			// Badges only earn their keep once there's more than one
+			// format to tell apart -- on a single-format server every
+			// line would carry the identical one badge, uninformative
+			// clutter rather than a signal (mirrors admin.js's own
+			// shouldShowFormatBadges() on the Tools page).
+			$show_badges = count( $summary['formats'] ) > 1;
+
+			foreach ( $summary['formats'] as $format => $data ) {
+				$badge = $show_badges
+					? '<span class="wwg-chip wwg-chip--' . esc_attr( $format ) . '">' . esc_html( WWG_Format::label( $format ) ) . '</span> '
+					: '';
+
+				if ( ! empty( $data['complete'] ) ) {
+					echo '<div class="wwg-cc-line">'
+						. '<span class="wwg-cc-check" aria-hidden="true">&#10003;</span> '
+						. $badge // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- already HTML-escaped above (esc_attr()/esc_html() on every dynamic piece before being wrapped in <span> markup, or the empty string); a second esc_html() pass here would double-escape it.
+						. '<span class="wwg-cc-figure">' . esc_html( size_format( $data['bytes'] ) ) . '</span> '
+						/* translators: %d: percent smaller than the original file. */
+						. '<span class="wwg-cc-percent">' . esc_html( sprintf( __( '%d%% smaller', 'webp-generator' ), $data['saved_percent'] ) ) . '</span>'
+						. '</div>';
+				} else {
+					// Deliberately still one line per incomplete format
+					// (not one shared "Not converted yet" for the whole
+					// row) -- on a multi-format site this is exactly what
+					// tells "WebP is fine, AVIF just hasn't run yet"
+					// apart from "nothing has ever been converted here",
+					// which look identical without it.
+					echo '<div class="wwg-cc-line">'
+						. $badge // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- see the note above.
+						. '<span class="wwg-cc-status wwg-cc-status--muted">' . esc_html__( 'Not converted yet', 'webp-generator' ) . '</span>'
+						. '</div>';
+				}
+			}
+
+			// Only 'partial' -- never 'converted' (nothing to do) -- and
+			// only for someone who could actually use it: this column
+			// itself is visible to anyone who can see the Media Library,
+			// but clicking this hits an AJAX action gated the same way
+			// every other interactive surface in this plugin already is.
+			// Deliberately never offered for 'failed' below -- a known
+			// failure needs the real Fix/Delete recovery machinery on the
+			// Tools page, not a plain retry that would just fail the same
+			// way again with no explanation.
+			if ( 'partial' === $summary['status'] && current_user_can( self::CAPABILITY ) ) {
+				printf(
+					'<button type="button" class="button button-small wwg-row-btn wwg-cc-generate-btn" data-attachment-id="%d">%s</button>',
+					(int) $post_id,
+					esc_html__( 'Generate', 'webp-generator' )
+				);
+			}
+			return;
+		}
+
+		if ( 'failed' === $summary['status'] ) {
+			$tools_url = admin_url( 'tools.php?page=' . self::PAGE_SLUG );
+			echo '<span class="wwg-chip wwg-chip--failed">' . esc_html__( 'Failed', 'webp-generator' ) . '</span> '
+				. '<span class="wwg-cc-status wwg-cc-status--failed">' . esc_html__( 'A size couldn’t be converted.', 'webp-generator' ) . '</span>'
+				. '<a class="wwg-cc-link" href="' . esc_url( $tools_url ) . '">' . esc_html__( 'View in Failed Conversions →', 'webp-generator' ) . '</a>';
+			return;
+		}
+
+		// 'not_yet' (no format enabled on this server at all) / 'unsupported'
+		// (not a JPEG/PNG, or no usable attachment metadata) -- both render
+		// as a plain empty cell: nothing meaningful to report either way,
+		// and 'not_yet' would otherwise repeat the same message on every
+		// single row.
+	}
+
+	/**
+	 * AJAX: the Media Library List view's own single-image "Generate"
+	 * button (see render_compression_column()'s 'partial' branch above).
+	 * Unlike the Tools page's bulk Generate, there's no job/progress state
+	 * to track here -- one attachment's handful of files converts fast
+	 * enough to just do it synchronously and hand back the result.
+	 *
+	 * Responds with fresh HTML for the one column cell that changed,
+	 * rather than raw data the client would have to re-render itself --
+	 * render_compression_column() is the only place that ever decides
+	 * what that cell looks like, on a fresh page load or right after this
+	 * click alike.
+	 */
+	public function handle_generate_attachment() {
+		check_ajax_referer( self::NONCE_ACTION, 'nonce' );
+
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => __( 'You do not have permission to do this.', 'webp-generator' ) ), 403 );
+		}
+
+		$attachment_id = isset( $_POST['attachment_id'] ) ? absint( $_POST['attachment_id'] ) : 0;
+		if ( ! $attachment_id || 'attachment' !== get_post_type( $attachment_id ) ) {
+			wp_send_json_error( array( 'message' => __( 'Something went wrong:', 'webp-generator' ) ), 400 );
+		}
+
+		$this->regenerate_attachment( $attachment_id );
+
+		ob_start();
+		$this->render_compression_column( 'wwg_compression', $attachment_id );
+		$html = ob_get_clean();
+
+		wp_send_json_success( array( 'html' => $html ) );
+	}
+
+	/**
+	 * Ensure every enabled format exists for one attachment's original and
+	 * every registered size -- the single-image counterpart to
+	 * process_batch()'s own per-file loop (~line 1984 above), sharing its
+	 * exact bookkeeping (forget_failure()/remember_failure()) so a result
+	 * from here is indistinguishable from one the Tools page's own
+	 * Generate would have found, whichever happens to surface it first.
+	 *
+	 * @param int $attachment_id
+	 */
+	private function regenerate_attachment( $attachment_id ) {
+		$metadata = wp_get_attachment_metadata( $attachment_id );
+		if ( empty( $metadata['file'] ) ) {
+			return;
+		}
+
+		$formats     = WWG_Format::enabled();
+		$upload_dir  = wp_get_upload_dir();
+		$base_dir    = trailingslashit( $upload_dir['basedir'] );
+		$created_any = false;
+
+		foreach ( $this->generator->get_source_files( $metadata ) as $abs_path ) {
+			if ( ! file_exists( $abs_path ) ) {
+				continue; // Gone from disk -- nothing here to convert.
+			}
+			$file_rel = ltrim( str_replace( $base_dir, '', $abs_path ), '/' );
+
+			foreach ( $this->generator->ensure_formats( $abs_path, $formats ) as $format => $outcome ) {
+				if ( 'exists' === $outcome['status'] ) {
+					continue;
+				}
+				if ( 'created' === $outcome['status'] ) {
+					$created_any = true;
+					$this->forget_failure( $file_rel, $format );
+					continue;
+				}
+				$this->remember_failure( $file_rel, $abs_path, $format, isset( $outcome['error'] ) ? $outcome['error'] : '' );
+			}
+		}
+
+		if ( $created_any ) {
+			WWG_Cache::clear_for_attachment( $attachment_id );
+		}
+	}
+
+	/**
+	 * Live per-attachment compression summary for the column above.
+	 * Cheap by construction -- one wp_get_attachment_metadata() call
+	 * (already warmed by the list table's own query) plus a handful of
+	 * file_exists()/filesize() stats against this one attachment's own
+	 * files, never a folder walk and never a decode.
+	 *
+	 * @param int $attachment_id
+	 * @return array {
+	 *     @type string $status         One of 'converted', 'partial',
+	 *                                  'failed', 'unsupported', 'not_yet'.
+	 *     @type int    $original_bytes Summed across the original + every
+	 *                                  registered size. Present only when
+	 *                                  status is 'converted'.
+	 *     @type array  $formats        format id => {bytes, saved_percent}.
+	 *                                  Present only when status is
+	 *                                  'converted'.
+	 * }
+	 */
+	private function compression_summary_for_attachment( $attachment_id ) {
+		if ( ! in_array( get_post_mime_type( $attachment_id ), WWG_Generator::SUPPORTED_MIME_TYPES, true ) ) {
+			return array( 'status' => 'unsupported' );
+		}
+
+		$formats = WWG_Format::enabled();
+		if ( empty( $formats ) ) {
+			return array( 'status' => 'not_yet' );
+		}
+
+		$metadata = wp_get_attachment_metadata( $attachment_id );
+		if ( empty( $metadata['file'] ) ) {
+			return array( 'status' => 'unsupported' );
+		}
+
+		$source_files = $this->generator->get_source_files( $metadata );
+		if ( empty( $source_files ) ) {
+			return array( 'status' => 'unsupported' );
+		}
+
+		$upload_dir = wp_get_upload_dir();
+		$base_dir   = trailingslashit( $upload_dir['basedir'] );
+
+		$original_bytes    = 0;
+		$format_bytes      = array_fill_keys( $formats, 0 );
+		$format_complete   = array_fill_keys( $formats, true );
+		$failed            = false;
+		$any_source_exists = false;
+
+		foreach ( $source_files as $abs_path ) {
+			if ( ! file_exists( $abs_path ) ) {
+				continue; // The source itself is gone -- nothing to report for it specifically.
+			}
+			$any_source_exists = true;
+			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- the file can legitimately vanish/become unreadable between the listing above and here; (int) cast already turns a false return into a harmless 0.
+			$original_bytes += (int) @filesize( $abs_path );
+			$file_rel        = ltrim( str_replace( $base_dir, '', $abs_path ), '/' );
+
+			foreach ( $formats as $format ) {
+				$target = WWG_Format::path_for( $format, $abs_path );
+				if ( $target && file_exists( $target ) ) {
+					// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- see above.
+					$format_bytes[ $format ] += (int) @filesize( $target );
+					continue;
+				}
+				$format_complete[ $format ] = false;
+				if ( false !== $this->is_known_failure( $file_rel, $abs_path, $format ) ) {
+					$failed = true;
+				}
+			}
+		}
+
+		if ( ! $any_source_exists ) {
+			// Every one of this attachment's files -- original included --
+			// is missing from disk (moved/deleted outside WordPress; a
+			// real, if rare, data-integrity issue distinct from anything
+			// this plugin does). Nothing to honestly report -- specifically
+			// NOT "converted, 0 B, 0% smaller", which the loop above would
+			// otherwise trivially satisfy having never found anything to
+			// check at all.
+			return array( 'status' => 'unsupported' );
+		}
+
+		if ( $failed ) {
+			return array( 'status' => 'failed' );
+		}
+
+		// Per-format breakdown either way -- 'partial' and 'converted' both
+		// report exactly which formats are actually ready, rather than a
+		// single blanket status. A blanket "Not converted yet" can't tell
+		// "this format specifically hasn't run yet" apart from "nothing
+		// has ever been converted for this file at all" -- the former
+		// reads, confusingly, identically to the latter, which is exactly
+		// what made an already-converted WebP file look like it had been
+		// deleted the moment AVIF (a second format) simply hadn't caught
+		// up to it yet.
+		$result = array(
+			'status'         => in_array( false, $format_complete, true ) ? 'partial' : 'converted',
+			'original_bytes' => $original_bytes,
+			'formats'        => array(),
+		);
+		foreach ( $formats as $format ) {
+			if ( $format_complete[ $format ] ) {
+				$bytes                        = $format_bytes[ $format ];
+				$result['formats'][ $format ] = array(
+					'complete'      => true,
+					'bytes'         => $bytes,
+					'saved_percent' => $original_bytes > 0 ? (int) round( ( 1 - ( $bytes / $original_bytes ) ) * 100 ) : 0,
+				);
+			} else {
+				$result['formats'][ $format ] = array( 'complete' => false );
+			}
+		}
+		return $result;
 	}
 }
